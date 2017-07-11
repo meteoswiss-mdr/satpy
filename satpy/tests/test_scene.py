@@ -230,6 +230,7 @@ class TestScene(unittest.TestCase):
         self.assertSetEqual(set(scene.wishlist), {ds1.id})
 
     def test_getitem(self):
+        """Test __getitem__ with names only"""
         from satpy import Scene, Dataset
         import numpy as np
         scene = Scene()
@@ -240,6 +241,33 @@ class TestScene(unittest.TestCase):
         self.assertIs(scene['2'], ds2)
         self.assertIs(scene['3'], ds3)
         self.assertRaises(KeyError, scene.__getitem__, '4')
+
+    def test_getitem_modifiers(self):
+        """Test __getitem__ with names and modifiers"""
+        from satpy import Scene, Dataset, DatasetID
+        import numpy as np
+
+        # Return least modified item
+        scene = Scene()
+        scene['1'] = ds1_m0 = Dataset(np.arange(5))
+        scene[DatasetID(name='1', modifiers=('mod1',))] = ds1_m1 = Dataset(np.arange(5))
+        self.assertIs(scene['1'], ds1_m0)
+        self.assertEquals(len(list(scene.keys())), 2)
+
+        scene = Scene()
+        scene['1'] = ds1_m0 = Dataset(np.arange(5))
+        scene[DatasetID(name='1', modifiers=('mod1',))] = ds1_m1 = Dataset(np.arange(5))
+        scene[DatasetID(name='1', modifiers=('mod1', 'mod2'))] = ds1_m2 = Dataset(np.arange(5))
+        self.assertIs(scene['1'], ds1_m0)
+        self.assertEquals(len(list(scene.keys())), 3)
+
+        scene = Scene()
+        scene[DatasetID(name='1', modifiers=('mod1', 'mod2'))] = ds1_m2 = Dataset(np.arange(5))
+        scene[DatasetID(name='1', modifiers=('mod1',))] = ds1_m1 = Dataset(np.arange(5))
+        self.assertIs(scene['1'], ds1_m1)
+        self.assertIs(scene[DatasetID('1', modifiers=('mod1', 'mod2'))], ds1_m2)
+        self.assertRaises(KeyError, scene.__getitem__, DatasetID(name='1', modifiers=tuple()))
+        self.assertEquals(len(list(scene.keys())), 2)
 
     def test_contains(self):
         from satpy import Scene, Dataset
@@ -404,6 +432,31 @@ class TestSceneLoading(unittest.TestCase):
                                   base_dir='bli',
                                   reader='fake_reader')
         self.assertRaises(KeyError, scene.load, ['im_a_dataset_that_doesnt_exist'])
+
+    @mock.patch('satpy.composites.CompositorLoader.load_compositors')
+    @mock.patch('satpy.scene.Scene.create_reader_instances')
+    def test_load_no_exist2(self, cri, cl):
+        """Test loading a dataset that doesn't exist then another load"""
+        from satpy.tests.utils import create_fake_reader, test_composites
+        from satpy import DatasetID, Scene
+        r = create_fake_reader('fake_reader', 'fake_sensor')
+        cri.return_value = {'fake_reader': r}
+        comps, mods = test_composites('fake_sensor')
+        cl.return_value = (comps, mods)
+        scene = Scene(filenames='bla',
+                      base_dir='bli',
+                      reader='fake_reader')
+        scene.load(['ds9_fail_load'])
+        loaded_ids = list(scene.datasets.keys())
+        self.assertEquals(len(loaded_ids), 0)
+        r.load.assert_called_once_with(set([DatasetID(name='ds9_fail_load', wavelength=(1.0, 1.1, 1.2))]))
+
+        scene.load(['ds1'])
+        loaded_ids = list(scene.datasets.keys())
+        self.assertEqual(r.load.call_count, 2)
+        # most recent call should have only been ds1
+        r.load.assert_called_with(set([DatasetID(name='ds1')]))
+        self.assertEquals(len(loaded_ids), 1)
 
     @mock.patch('satpy.scene.Scene.create_reader_instances')
     def test_load_ds1_no_comps(self, cri):
@@ -876,7 +929,47 @@ class TestSceneLoading(unittest.TestCase):
         # we should only load from the file twice
         self.assertEqual(r.load.call_count, 2)
         # we should only compute the composite once
-        self.assertEqual(comps['fake_sensor']['comp3'].call_count, 1)
+        self.assertEqual(comps['fake_sensor']['comp3'].side_effect.call_count, 1)
+        loaded_ids = list(scene.datasets.keys())
+        self.assertEquals(len(loaded_ids), 2)
+
+    @mock.patch('satpy.composites.CompositorLoader.load_compositors')
+    @mock.patch('satpy.scene.Scene.create_reader_instances')
+    def test_load_dataset_after_composite2(self, cri, cl):
+        """Test load complex composite followed by other datasets"""
+        import satpy.scene
+        from satpy.tests.utils import create_fake_reader, test_composites
+        from satpy import DatasetID
+        r = create_fake_reader('fake_reader', 'fake_sensor')
+        cri.return_value = {'fake_reader': r}
+        comps, mods = test_composites('fake_sensor')
+        cl.return_value = (comps, mods)
+        scene = satpy.scene.Scene(filenames='bla',
+                                  base_dir='bli',
+                                  reader='fake_reader')
+        scene.load(['comp10'])
+        self.assertEqual(r.load.call_count, 1)
+        loaded_ids = list(scene.datasets.keys())
+        self.assertEquals(len(loaded_ids), 1)
+        with mock.patch.object(scene, 'read_composites', wraps=scene.read_composites) as m:
+            scene.load(['ds1'])
+            self.assertEqual(r.load.call_count, 2)
+            loaded_ids = list(scene.datasets.keys())
+            self.assertEquals(len(loaded_ids), 2)
+            self.assertIn(DatasetID(name='ds1'), loaded_ids) # this is the unmodified ds1
+            # m.assert_called_once_with(set([scene.dep_tree['ds1']]))
+            m.assert_called_once_with(set())
+        with mock.patch.object(scene, 'read_composites', wraps=scene.read_composites) as m:
+            scene.load(['ds1'])
+            self.assertEqual(r.load.call_count, 2)
+            loaded_ids = list(scene.datasets.keys())
+            self.assertEquals(len(loaded_ids), 2)
+            self.assertIn(DatasetID(name='ds1'), loaded_ids) # this is the unmodified ds1
+            m.assert_called_once_with(set())
+        # we should only compute the composite once
+        self.assertEqual(comps['fake_sensor']['comp10'].side_effect.call_count, 1)
+        # Create the modded ds1 at comp10, then load the numodified version again
+        self.assertEqual(comps['fake_sensor']['ds1']._call_mock.call_count, 1)
         loaded_ids = list(scene.datasets.keys())
         self.assertEquals(len(loaded_ids), 2)
 

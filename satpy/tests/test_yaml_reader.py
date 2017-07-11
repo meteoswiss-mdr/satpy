@@ -396,7 +396,7 @@ class TestFileFileYAMLReader(unittest.TestCase):
                                            resolution=None,
                                            polarization=None,
                                            calibration='reflectance',
-                                           modifiers=None)])
+                                           modifiers=tuple())])
 
     def test_dfilter_from_key(self):
         """Test creating a dfilter from a key."""
@@ -479,7 +479,7 @@ class TestFileFileYAMLReader(unittest.TestCase):
                                            resolution=None,
                                            polarization=None,
                                            calibration='reflectance',
-                                           modifiers=None)])
+                                           modifiers=tuple())])
 
     def test_datasets_from_any_key(self):
         """Test getting dataset from any key."""

@@ -30,8 +30,8 @@ import os
 from satpy.composites import CompositorLoader, IncompatibleAreas
 from satpy.config import (config_search_paths, get_environ_config_dir,
                           runtime_import)
+from satpy.dataset import Dataset, DatasetID, InfoObject
 from satpy.node import DependencyTree
-from satpy.dataset import InfoObject, Dataset, DatasetID
 from satpy.readers import DatasetDict, ReaderFinder
 
 try:
@@ -291,6 +291,9 @@ class Scene(InfoObject):
         for area_name, (area_obj, ds_list) in datasets_by_area.items():
             yield area_obj, ds_list
 
+    def keys(self, **kwargs):
+        return self.datasets.keys(**kwargs)
+
     def __getitem__(self, key):
         """Get a dataset."""
         return self.datasets[key]
@@ -443,7 +446,7 @@ class Scene(InfoObject):
 
     def read(self, nodes=None, **kwargs):
         """Load datasets from the necessary reader.
-        
+
         Args:
             nodes (iterable): DependencyTree Node objects
             **kwargs: Keyword arguments to pass to the reader's `load` method.
@@ -461,11 +464,30 @@ class Scene(InfoObject):
         """Compute all the composites contained in `requirements`.
         """
         if nodes is None:
-            nodes = self.dep_tree.trunk()
+            required_nodes = self.wishlist - set(self.datasets.keys())
+            nodes = set(self.dep_tree.trunk(nodes=required_nodes)) - \
+                set(self.datasets.keys())
         return self.read_composites(nodes)
 
+    def _remove_failed_datasets(self, keepables):
+        keepables = keepables or set()
+        # remove reader datasets that couldn't be loaded so they aren't
+        # attempted again later
+        for n in self.missing_datasets:
+            if n not in keepables:
+                self.wishlist.discard(n)
+
     def unload(self, keepables=None):
-        """Unload all loaded composites.
+        """Unload all unneeded datasets.
+
+        Datasets are considered unneeded if they weren't directly requested
+        or added to the Scene by the user or they are no longer needed to
+        compute composites that have yet to be computed.
+
+        Args:
+            keepables (iterable): DatasetIDs to keep whether they are needed
+                                  or not.
+
         """
         to_del = [ds_id for ds_id, projectable in self.datasets.items()
                   if ds_id not in self.wishlist and (not keepables or ds_id
@@ -484,12 +506,13 @@ class Scene(InfoObject):
         """Read, compute and unload.
         """
         dataset_keys = set(wishlist)
-        self.wishlist |= dataset_keys
-
-        unknown = self.dep_tree.find_dependencies(self.wishlist,
+        needed_datasets = (self.wishlist | dataset_keys) - \
+            set(self.datasets.keys())
+        unknown = self.dep_tree.find_dependencies(needed_datasets,
                                                   calibration=calibration,
                                                   polarization=polarization,
                                                   resolution=resolution)
+        self.wishlist |= needed_datasets
         if unknown:
             unknown_str = ", ".join(map(str, unknown))
             raise KeyError("Unknown datasets: {}".format(unknown_str))
@@ -499,7 +522,11 @@ class Scene(InfoObject):
         if compute:
             keepables = self.compute()
         if self.missing_datasets:
-            missing_str = ", ".join(map(str, self.missing_datasets))
+            # copy the set of missing datasets because they won't be valid
+            # after they are removed in the next line
+            missing = self.missing_datasets.copy()
+            self._remove_failed_datasets(keepables)
+            missing_str = ", ".join(str(x) for x in missing)
             LOG.warning(
                 "The following datasets were not created: {}".format(missing_str))
         if unload:
@@ -538,7 +565,11 @@ class Scene(InfoObject):
                      for i in new_scn.wishlist if not self.dep_tree[i].is_leaf]
             keepables = new_scn.compute(nodes=nodes)
         if new_scn.missing_datasets:
-            missing_str = ", ".join(map(str, new_scn.missing_datasets))
+            # copy the set of missing datasets because they won't be valid
+            # after they are removed in the next line
+            missing = new_scn.missing_datasets.copy()
+            new_scn._remove_failed_datasets(keepables)
+            missing_str = ", ".join(str(x) for x in missing)
             LOG.warning(
                 "The following datasets were not created: {}".format(missing_str))
         if unload:
@@ -590,7 +621,7 @@ class Scene(InfoObject):
             writer = self.get_writer(writer, **kwargs)
         writer.save_dataset(self[dataset_id],
                             filename=filename,
-                            overlay=overlay)
+                            overlay=overlay, **kwargs)
 
     def save_datasets(self, writer="geotiff", datasets=None, **kwargs):
         """Save all the datasets present in a scene to disk using *writer*.

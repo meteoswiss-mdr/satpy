@@ -115,7 +115,7 @@ def add_overlay(orig, area, coast_dir, color=(0, 0, 0), width=0.5, resolution=No
     arr = np.array(img)
 
     if len(orig.channels) == 1:
-        orgi.channels[0] = np.ma.array(arr[:, :] / 255.0)
+        orig.channels[0] = np.ma.array(arr[:, :] / 255.0)
     else:
         for idx in range(len(orig.channels)):
             orig.channels[idx] = np.ma.array(arr[:, :, idx] / 255.0)
@@ -292,8 +292,15 @@ class EnhancementDecisionTree(object):
     def add_config_to_tree(self, *config_files):
         conf = {}
         for config_file in config_files:
-            with open(config_file) as fd:
-                conf = recursive_dict_update(conf, yaml.load(fd))
+            if os.path.isfile(config_file):
+                with open(config_file) as fd:
+                    conf = recursive_dict_update(conf, yaml.load(fd))
+            else:
+                LOG.debug("Loading enhancement config string")
+                d = yaml.load(config_file)
+                if not isinstance(d, dict):
+                    raise ValueError("YAML file doesn't exist or string is not YAML dict: {}".format(config_file))
+                conf = recursive_dict_update(conf, d)
 
         self._build_tree(conf)
 
@@ -379,15 +386,16 @@ class Enhancer(object):
             config_fn = os.path.join("enhancements", "generic.yaml")
             self.enhancement_config_file = config_search_paths(
                 config_fn, self.ppp_config_dir)
-        if not isinstance(self.enhancement_config_file, (list, tuple)):
-            self.enhancement_config_file = [self.enhancement_config_file]
 
-        if self.enhancement_config_file:
-            self.enhancement_tree = EnhancementDecisionTree(
-                *self.enhancement_config_file)
-        else:
+        if not self.enhancement_config_file:
             # They don't want any automatic enhancements
             self.enhancement_tree = None
+        else:
+            if not isinstance(self.enhancement_config_file, (list, tuple)):
+                self.enhancement_config_file = [self.enhancement_config_file]
+
+            self.enhancement_tree = EnhancementDecisionTree(
+                *self.enhancement_config_file)
 
         self.sensor_enhancement_configs = []
 

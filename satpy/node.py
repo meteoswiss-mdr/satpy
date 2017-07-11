@@ -22,7 +22,8 @@
 """Nodes to build trees."""
 
 import logging
-from satpy import DatasetID, DatasetDict
+
+from satpy import DatasetDict, DatasetID
 
 LOG = logging.getLogger(__name__)
 
@@ -75,6 +76,9 @@ class Node(object):
     def __str__(self):
         """Display the node."""
         return self.display()
+
+    def __repr__(self):
+        return "<Node ({})>".format(repr(self.name))
 
     def __eq__(self, other):
         return self.name == other.name
@@ -169,6 +173,28 @@ class DependencyTree(Node):
                     res.append(sub_child)
         return res
 
+    def trunk(self, nodes=None, unique=True):
+        """Get the trunk nodes of the tree starting at this root.
+        
+        Args:
+            nodes (iterable): limit trunk nodes to the names specified or the
+                              children of them that are also trunk nodes.
+            unique: only include individual trunk nodes once
+            
+        Returns:
+            list of trunk nodes
+            
+        """
+        if nodes is None:
+            return super(DependencyTree, self).trunk(unique=unique)
+
+        res = list()
+        for child_id in nodes:
+            for sub_child in self._all_nodes[child_id].trunk(unique=unique):
+                if not unique or sub_child not in res:
+                    res.append(sub_child)
+        return res
+
     def add_child(self, parent, child):
         Node.add_child(parent, child)
         self._all_nodes[child.name] = child
@@ -194,11 +220,6 @@ class DependencyTree(Node):
 
     def __getitem__(self, item):
         return self._all_nodes[item]
-
-    # def update(self, other):
-    #     self.flatten()
-    #     for child in other.children:
-    #         self.children.append(child)
 
     def get_compositor(self, key):
         for sensor_name in self.compositors.keys():

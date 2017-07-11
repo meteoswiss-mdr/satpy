@@ -20,22 +20,16 @@
 
 # You should have received a copy of the GNU General Public License along with
 # satpy.  If not, see <http://www.gnu.org/licenses/>.
-"""Shared objects of the various reader classes.
-
-"""
+"""Shared objects of the various reader classes."""
 
 import logging
 import numbers
 import os
-from abc import ABCMeta, abstractmethod, abstractproperty
-from collections import namedtuple
-
-import numpy as np
 import six
 import yaml
 
-from satpy.config import config_search_paths, glob_config, runtime_import
-from satpy.dataset import DatasetID, DATASET_KEYS
+from satpy.config import config_search_paths, glob_config, get_environ_config_dir
+from satpy.dataset import DATASET_KEYS, DatasetID
 
 try:
     import configparser
@@ -50,7 +44,6 @@ class MalformedConfigError(Exception):
 
 
 class DatasetDict(dict):
-
     """Special dictionary object that can handle dict operations based on
     dataset name, wavelength, or DatasetID.
 
@@ -61,7 +54,8 @@ class DatasetDict(dict):
         super(DatasetDict, self).__init__(*args, **kwargs)
 
     def keys(self, names=False, wavelengths=False):
-        keys = super(DatasetDict, self).keys()
+        # sort keys so things are a little more deterministic (.keys() is not)
+        keys = sorted(super(DatasetDict, self).keys())
         if names:
             return (k.name for k in keys)
         elif wavelengths:
@@ -139,8 +133,8 @@ class DatasetDict(dict):
     def get_best_choice(self, key, choices):
         if key.modifiers is None and choices:
             num_modifiers = min(len(x.modifiers or tuple()) for x in choices)
-            choices = [
-                c for c in choices if len(c.modifiers or tuple()) == num_modifiers]
+            choices = [c for c in choices if len(
+                c.modifiers or tuple()) == num_modifiers]
         if key.resolution is None and choices:
             low_res = [x.resolution for x in choices if x.resolution]
             if low_res:
@@ -204,7 +198,7 @@ class DatasetDict(dict):
                                 wavelength=d.get("wavelength"),
                                 polarization=d.get("polarization"),
                                 calibration=d.get("calibration"),
-                                modifiers=d.get("modifiers"))
+                                modifiers=d.get("modifiers", tuple()))
                 if key.name is None and key.wavelength is None:
                     raise ValueError(
                         "One of 'name' or 'wavelength' info values should be set.")
@@ -265,12 +259,11 @@ def load_reader(reader_configs, **reader_kwargs):
 
 
 class ReaderFinder(object):
-
     """Find readers given a scene, filenames, sensors, and/or a reader_name
     """
 
     def __init__(self,
-                 ppp_config_dir=None,
+                 ppp_config_dir=get_environ_config_dir(),
                  base_dir=None,
                  start_time=None,
                  end_time=None,
@@ -305,6 +298,7 @@ class ReaderFinder(object):
             config_files = set(self.config_files())
         # FUTURE: Allow for a reader instance to be passed
 
+        sensor_supported = False
         remaining_filenames = set(
             filenames) if filenames is not None else set()
         for config_file in config_files:
@@ -329,6 +323,9 @@ class ReaderFinder(object):
 
             if not reader_instance.supports_sensor(sensor):
                 continue
+            elif sensor is not None:
+                # sensor was specified and a reader supports it
+                sensor_supported = True
             if remaining_filenames:
                 loadables = reader_instance.select_files_from_pathnames(
                     remaining_filenames)
@@ -343,6 +340,9 @@ class ReaderFinder(object):
                 # we were given filenames to look through and found a reader
                 # for all of them
                 break
+
+        if sensor and not sensor_supported:
+            LOG.warning("Sensor '{}' not supported by any readers".format(sensor))
 
         if remaining_filenames:
             LOG.warning(

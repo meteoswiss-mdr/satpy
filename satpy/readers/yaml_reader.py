@@ -22,7 +22,6 @@
 
 # New stuff
 
-import copy
 import glob
 import itertools
 import logging
@@ -36,8 +35,7 @@ import numpy as np
 import six
 import yaml
 
-from pyresample.geometry import AreaDefinition, StackedAreaDefinition
-from satpy.composites import IncompatibleAreas
+from pyresample.geometry import SwathDefinition, StackedAreaDefinition
 from satpy.config import recursive_dict_update
 from satpy.dataset import DATASET_KEYS, Dataset, DatasetID
 from satpy.readers import DatasetDict
@@ -102,16 +100,17 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
         self.info = self.config['reader']
         self.name = self.info['name']
         self.file_patterns = []
-        for file_type in self.config['file_types'].values():
+        for file_type, filetype_info in self.config['file_types'].items():
+            filetype_info.setdefault('file_type', file_type)
             # correct separator if needed
             file_patterns = [os.path.join(*pattern.split('/'))
-                             for pattern in file_type['file_patterns']]
+                             for pattern in filetype_info['file_patterns']]
             self.file_patterns.extend(file_patterns)
 
         if not isinstance(self.info['sensors'], (list, tuple)):
             self.info['sensors'] = [self.info['sensors']]
         self.sensor_names = self.info['sensors']
-        self.datasets = self.config['datasets']
+        self.datasets = self.config.get('datasets', {})
         self.info['filenames'] = []
         self.ids = {}
         self.load_ds_ids_from_config()
@@ -207,7 +206,9 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
             ids = self.ids.keys()
         for key in DATASET_KEYS:
             value = getattr(dsid, key)
-            if value is None:
+            if value is None or (key == 'modifiers' and not value):
+                # filter everything else except modifiers if it isn't
+                # specified (None or tuple())
                 continue
             if key == "wavelength":
                 ids = self.get_ds_ids_by_wavelength(dsid.wavelength, ids)
@@ -236,8 +237,11 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
             dfilter = {}
         else:
             dfilter = dfilter.copy()
-        for attr in ['calibration', 'polarization', 'resolution', 'modifiers']:
+        for attr in ['calibration', 'polarization', 'resolution']:
             dfilter[attr] = dfilter.get(attr) or getattr(key, attr, None)
+        # modifiers default is an empty tuple so handle it specially
+        dfilter['modifiers'] = dfilter.get('modifiers',
+                                           getattr(key, 'modifiers', None) or None)
 
         for attr in ['calibration', 'polarization', 'resolution']:
             if (dfilter[attr] is not None
@@ -384,7 +388,8 @@ class FileYAMLReader(AbstractYAMLReader):
                                              area=area)
 
         self.file_handlers = {}
-        self.filter_filenames = self.info.get('filter_filenames', filter_filenames)
+        self.filter_filenames = self.info.get(
+            'filter_filenames', filter_filenames)
 
     @property
     def available_dataset_ids(self):
@@ -437,7 +442,8 @@ class FileYAMLReader(AbstractYAMLReader):
         if requirements:
             for requirement in requirements:
                 for fhd in self.file_handlers[requirement]:
-                    # FIXME: Isn't this super wasteful? filename_info.items() every iteration?
+                    # FIXME: Isn't this super wasteful? filename_info.items()
+                    # every iteration?
                     if (all(item in filename_info.items()
                             for item in fhd.filename_info.items())):
                         req_fh.append(fhd)
@@ -504,7 +510,7 @@ class FileYAMLReader(AbstractYAMLReader):
 
     def filter_filenames_by_info(self, filename_items):
         """Filter out file using metadata from the filenames.
-        
+
         Currently only uses start and end time.
         """
         for filename, filename_info in filename_items:
@@ -608,6 +614,7 @@ class FileYAMLReader(AbstractYAMLReader):
 
         offset = 0
         out_offset = 0
+        failure = True
         for idx, fh in enumerate(file_handlers):
             segment_height = all_shapes[idx][0]
             # XXX: Does this work with masked arrays and subclasses of them?
@@ -634,11 +641,19 @@ class FileYAMLReader(AbstractYAMLReader):
 
             try:
                 fh.get_dataset(dsid, ds_info, out=shuttle, **kwargs)
+                failure = False
             except KeyError:
-                continue
+                logger.warning(
+                    "Failed to load {} from {}".format(dsid, fh), exc_info=True)
+                mask[out_offset:out_offset + stop - start] = True
 
             out_offset += stop - start
             offset += segment_height
+
+        if failure:
+            raise KeyError(
+                "Could not load {} from any provided files".format(dsid))
+
         out_info.pop('area', None)
         return cls(data, mask=mask, copy=False, **out_info)
 
@@ -726,17 +741,21 @@ class FileYAMLReader(AbstractYAMLReader):
 
     def _make_area_from_coords(self, coords):
         """Create an apropriate area with the given *coords*."""
-        if (len(coords) == 2 and
-                coords[0].info.get('standard_name') == 'longitude' and
-                coords[1].info.get('standard_name') == 'latitude'):
-            from pyresample.geometry import SwathDefinition
-            sdef = SwathDefinition(*coords)
-            sensor_str = sdef.name = '_'.join(self.info['sensors'])
-            shape_str = '_'.join(map(str, coords[0].shape))
-            sdef.name = "{}_{}_{}_{}".format(sensor_str, shape_str,
-                                             coords[0].info['name'],
-                                             coords[1].info['name'])
-            return sdef
+        if len(coords) == 2:
+            lon_sn = coords[0].info.get('standard_name')
+            lat_sn = coords[1].info.get('standard_name')
+            if lon_sn == 'longitude' and lat_sn == 'latitude':
+                sdef = SwathDefinition(*coords)
+                sensor_str = sdef.name = '_'.join(self.info['sensors'])
+                shape_str = '_'.join(map(str, coords[0].shape))
+                sdef.name = "{}_{}_{}_{}".format(sensor_str, shape_str,
+                                                 coords[0].info['name'],
+                                                 coords[1].info['name'])
+                return sdef
+            else:
+                raise ValueError(
+                    'Coordinates info object missing standard_name key: ' +
+                    str(coords))
         elif len(coords) != 0:
             raise NameError("Don't know what to do with coordinates " + str(
                 coords))
@@ -746,6 +765,10 @@ class FileYAMLReader(AbstractYAMLReader):
         try:
             return self._load_area_def(dsid, file_handlers)
         except NotImplementedError:
+            if any(x is None for x in coords):
+                logger.warning("Failed to load coordinates for '{}'".format(dsid))
+                return None
+
             area = self._make_area_from_coords(coords)
             if area is None:
                 logger.debug("No coordinates found for %s", str(dsid))
@@ -796,18 +819,21 @@ class FileYAMLReader(AbstractYAMLReader):
 
     def load(self, dataset_keys):
         """Load *dataset_keys*."""
+        all_datasets = DatasetDict()
         datasets = DatasetDict()
 
         # Include coordinates in the list of datasets to load
         dsids = [self.get_dataset_key(ds_key) for ds_key in dataset_keys]
         coordinates = self._get_coordinates_for_dataset_keys(dsids)
-        dsids = list(set().union(*coordinates.values())) + dsids
+        all_dsids = list(set().union(*coordinates.values())) + dsids
 
-        for dsid in dsids:
-            coords = [datasets.get(cid, None)
+        for dsid in all_dsids:
+            coords = [all_datasets.get(cid, None)
                       for cid in coordinates.get(dsid, [])]
             ds = self._load_dataset_with_area(dsid, coords)
             if ds is not None:
-                datasets[dsid] = ds
+                all_datasets[dsid] = ds
+                if dsid in dsids:
+                    datasets[dsid] = ds
 
         return datasets

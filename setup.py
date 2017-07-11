@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Copyright (c) 2009-2016.
+# Copyright (c) 2009-2017.
 
 # Author(s):
 
@@ -96,14 +96,16 @@ setup(name=NAME,
                               os.path.join('etc', 'readers', '*.yaml'),
                               os.path.join('etc', 'writers', '*.cfg'),
                               os.path.join('etc', 'composites', '*.yaml'),
-                              os.path.join('etc', 'enhancements', '*.cfg')]},
+                              os.path.join('etc', 'enhancements', '*.cfg'),
+                              os.path.join('etc', 'enhancements', '*.yaml'),
+                              ]},
       zip_safe=False,
       install_requires=requires,
       tests_require=test_requires,
       extras_require={'xRIT': ['mipp >= 0.6.0'],
-                      'hdf_eos': ['pyhdf'],
+                      'hdf_eos': ['python-pyhdf'],
                       'viirs': ['h5py >= 2.7.0'],
-                      'nc': ['netCDF4'],
+                      'nc': ['netCDF4 >= 1.1.8'],
                       'hrpt': ['pyorbital', 'pygac', 'python-geotiepoints'],
                       'proj': ['pyresample'],
                       'pyspectral': ['pyspectral'],
