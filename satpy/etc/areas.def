@@ -7,6 +7,15 @@ REGION: australia {
 	AREA_EXTENT:	(-2504688.5428486555, -5591295.9185533915, 2504688.5428486555, -1111475.102852225)
 };
 
+REGION: ccs4 {
+        NAME:           CCS4 Swiss projection
+        PCS_ID:         somerc
+        PCS_DEF:        proj=somerc, lat_0=46.9524055555556, lon_0=7.43958333333333, ellps=bessel, x_0=600000, y_0=200000, k_0=1
+        XSIZE:          710
+        YSIZE:          640
+        AREA_EXTENT:    (255000.0, -160000.0, 965000.0, 480000.0)
+};
+
 REGION: mali {
 	NAME:	mali
 	PCS_ID:	merc_-1.0_19.0
