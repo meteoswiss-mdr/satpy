@@ -20,13 +20,13 @@
 # You should have received a copy of the GNU General Public License along with
 # satpy.  If not, see <http://www.gnu.org/licenses/>.
 
-from abc import ABCMeta, abstractmethod, abstractproperty
+from abc import ABCMeta
 
 import numpy as np
 import six
 
 from pyresample.geometry import SwathDefinition
-from satpy.dataset import combine_info
+from satpy.dataset import combine_metadata
 
 
 # what about file pattern and config ?
@@ -39,6 +39,7 @@ class BaseFileHandler(six.with_metaclass(ABCMeta, object)):
         self.navigation_reader = None
         self.filename_info = filename_info
         self.filetype_info = filetype_info
+        self.metadata = filename_info.copy()
 
     def __str__(self):
         return "<{}: '{}'>".format(self.__class__.__name__, self.filename)
@@ -57,9 +58,11 @@ class BaseFileHandler(six.with_metaclass(ABCMeta, object)):
         raise NotImplementedError
 
     def get_bounding_box(self):
-        raise NotImplementedError
+        """Get the bounding box of the files, as a (lons, lats) tuple.
 
-    def get_lonlats(self, nav_id, nav_info, lon_out=None, lat_out=None):
+        The tuple return should a lons and lats list of coordinates traveling
+        clockwise around the points available in the file.
+        """
         raise NotImplementedError
 
     def combine_info(self, all_infos):
@@ -82,7 +85,7 @@ class BaseFileHandler(six.with_metaclass(ABCMeta, object)):
          Also, concatenate the areas.
 
         """
-        combined_info = combine_info(*all_infos)
+        combined_info = combine_metadata(*all_infos)
         if 'start_time' not in combined_info and 'start_time' in all_infos[0]:
             combined_info['start_time'] = min(
                 i['start_time'] for i in all_infos)
@@ -111,3 +114,8 @@ class BaseFileHandler(six.with_metaclass(ABCMeta, object)):
     @property
     def end_time(self):
         return self.filename_info.get('end_time', self.start_time)
+
+    @property
+    def sensor_names(self):
+        """List of sensors represented in this file."""
+        raise NotImplementedError

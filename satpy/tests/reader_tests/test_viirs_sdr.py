@@ -9,7 +9,12 @@ if sys.version_info < (2, 7):
     import unittest2 as unittest
 else:
     import unittest
-import mock
+
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 import numpy as np
 from satpy.tests.reader_tests.test_hdf5_utils import FakeHDF5FileHandler
 
@@ -96,6 +101,15 @@ class FakeHDF5FileHandler2(FakeHDF5FileHandler):
                 file_content[k] = np.repeat([file_content[k]], DEFAULT_FILE_SHAPE[0], axis=0)
                 file_content[k + "/shape"] = DEFAULT_FILE_SHAPE
 
+        # convert to xarrays
+        from xarray import DataArray
+        for key, val in file_content.items():
+            if isinstance(val, np.ndarray):
+                if val.ndim > 1:
+                    file_content[key] = DataArray(val, dims=('y', 'x'))
+                else:
+                    file_content[key] = DataArray(val)
+
         return file_content
 
 
@@ -134,7 +148,9 @@ class TestVIIRSSDRReader(unittest.TestCase):
         from satpy.readers import load_reader
         from datetime import datetime
         r = load_reader(self.reader_configs,
-                        start_time=datetime(2012, 2, 26))
+                        filter_parameters={
+                            'start_time': datetime(2012, 2, 26)
+                        })
         loadables = r.select_files_from_pathnames([
             'SVI01_npp_d20120225_t1801245_e1802487_b01708_c20120226002130255476_noaa_ops.h5',
         ])
@@ -145,7 +161,9 @@ class TestVIIRSSDRReader(unittest.TestCase):
         from satpy.readers import load_reader
         from datetime import datetime
         r = load_reader(self.reader_configs,
-                        end_time=datetime(2012, 2, 24))
+                        filter_parameters={
+                            'end_time': datetime(2012, 2, 24)
+                        })
         loadables = r.select_files_from_pathnames([
             'SVI01_npp_d20120225_t1801245_e1802487_b01708_c20120226002130255476_noaa_ops.h5',
         ])
@@ -156,8 +174,10 @@ class TestVIIRSSDRReader(unittest.TestCase):
         from satpy.readers import load_reader
         from datetime import datetime
         r = load_reader(self.reader_configs,
-                        start_time=datetime(2012, 2, 24),
-                        end_time=datetime(2012, 2, 26))
+                        filter_parameters={
+                            'start_time': datetime(2012, 2, 24),
+                            'end_time': datetime(2012, 2, 26)
+                        })
         loadables = r.select_files_from_pathnames([
             'SVI01_npp_d20120225_t1801245_e1802487_b01708_c20120226002130255476_noaa_ops.h5',
         ])
@@ -198,9 +218,9 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 11)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'reflectance')
-            self.assertEqual(d.info['units'], '%')
-            self.assertNotIn('area', d.info)
+            self.assertEqual(d.attrs['calibration'], 'reflectance')
+            self.assertEqual(d.attrs['units'], '%')
+            self.assertNotIn('area', d.attrs)
 
     def test_load_all_m_reflectances_find_geo(self):
         """Load all M band reflectances with geo files not specified but existing"""
@@ -242,10 +262,10 @@ class TestVIIRSSDRReader(unittest.TestCase):
 
         self.assertEqual(len(ds), 11)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'reflectance')
-            self.assertEqual(d.info['units'], '%')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertEqual(d.attrs['calibration'], 'reflectance')
+            self.assertEqual(d.attrs['units'], '%')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
     def test_load_all_m_reflectances_provided_geo(self):
         """Load all M band reflectances with geo files provided"""
@@ -280,12 +300,12 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 11)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'reflectance')
-            self.assertEqual(d.info['units'], '%')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
-            self.assertEqual(d.info['area'].lons.min(), 5)
-            self.assertEqual(d.info['area'].lats.min(), 45)
+            self.assertEqual(d.attrs['calibration'], 'reflectance')
+            self.assertEqual(d.attrs['units'], '%')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
+            self.assertEqual(d.attrs['area'].lons.min(), 5)
+            self.assertEqual(d.attrs['area'].lats.min(), 45)
 
     def test_load_all_m_reflectances_use_nontc(self):
         """Load all M band reflectances but use non-TC geolocation"""
@@ -321,12 +341,12 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 11)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'reflectance')
-            self.assertEqual(d.info['units'], '%')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
-            self.assertEqual(d.info['area'].lons.min(), 15)
-            self.assertEqual(d.info['area'].lats.min(), 55)
+            self.assertEqual(d.attrs['calibration'], 'reflectance')
+            self.assertEqual(d.attrs['units'], '%')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
+            self.assertEqual(d.attrs['area'].lons.min(), 15)
+            self.assertEqual(d.attrs['area'].lats.min(), 55)
 
     def test_load_all_m_reflectances_use_nontc2(self):
         """Load all M band reflectances but use non-TC geolocation (use_tc=None)"""
@@ -361,12 +381,12 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 11)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'reflectance')
-            self.assertEqual(d.info['units'], '%')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
-            self.assertEqual(d.info['area'].lons.min(), 15)
-            self.assertEqual(d.info['area'].lats.min(), 55)
+            self.assertEqual(d.attrs['calibration'], 'reflectance')
+            self.assertEqual(d.attrs['units'], '%')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
+            self.assertEqual(d.attrs['area'].lons.min(), 15)
+            self.assertEqual(d.attrs['area'].lats.min(), 55)
 
     def test_load_all_m_bts(self):
         """Load all M band brightness temperatures"""
@@ -389,10 +409,10 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 5)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'brightness_temperature')
-            self.assertEqual(d.info['units'], 'K')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertEqual(d.attrs['calibration'], 'brightness_temperature')
+            self.assertEqual(d.attrs['units'], 'K')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
     def test_load_all_m_radiances(self):
         """Load all M band radiances"""
@@ -439,10 +459,10 @@ class TestVIIRSSDRReader(unittest.TestCase):
                      ])
         self.assertEqual(len(ds), 16)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'radiance')
-            self.assertEqual(d.info['units'], 'W m-2 um-1 sr-1')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertEqual(d.attrs['calibration'], 'radiance')
+            self.assertEqual(d.attrs['units'], 'W m-2 um-1 sr-1')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
     def test_load_dnb(self):
         """Load DNB dataset"""
@@ -456,10 +476,10 @@ class TestVIIRSSDRReader(unittest.TestCase):
         ds = r.load(['DNB'])
         self.assertEqual(len(ds), 1)
         for d in ds.values():
-            self.assertEqual(d.info['calibration'], 'radiance')
-            self.assertEqual(d.info['units'], 'W m-2 sr-1')
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertEqual(d.attrs['calibration'], 'radiance')
+            self.assertEqual(d.attrs['units'], 'W m-2 sr-1')
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
     def test_load_i_no_files(self):
         """Load I01 when only DNB files are provided"""

@@ -26,8 +26,19 @@
 import sys
 from datetime import datetime
 
-import mock
 import numpy as np
+from satpy.readers.native_msg import NativeMSGFileHandler
+
+if sys.version_info < (2, 7):
+    import unittest2 as unittest
+else:
+    import unittest
+
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 
 CAL_DTYPE = np.array([[(0.0208876,  -1.06526761), (0.0278805,  -1.42190546),
                        (0.0235881,  -1.20299312), (0.00365867,  -0.18659201),
@@ -77,13 +88,6 @@ for item in CHANNEL_ORDER_LIST:
 CALIBRATION_TYPE = np.array(
     [[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]], dtype=np.uint8)
 
-from satpy.readers.native_msg import NativeMSGFileHandler
-
-if sys.version_info < (2, 7):
-    import unittest2 as unittest
-else:
-    import unittest
-
 
 def assertNumpyArraysEqual(self, other):
     if self.shape != other.shape:
@@ -130,7 +134,7 @@ class TestNativeMSGFileHandler(unittest.TestCase):
 
         data = np.ma.ones((3, 5)) * 700 + np.arange(0, 45, 3).reshape(3, 5)
         key_name = 'IR_108'
-        self.reader.convert_to_radiance(data, key_name)
+        data = self.reader.convert_to_radiance(data, key_name)
         assertNumpyArraysEqual(data.data, IR_108_RADIANCES.data)
 
     def test_vis_calibrate(self):
@@ -138,7 +142,7 @@ class TestNativeMSGFileHandler(unittest.TestCase):
 
         key_name = 'VIS006'
         data = VIS006_RADIANCES[:]
-        self.reader._vis_calibrate(data, key_name)
+        data = self.reader._vis_calibrate(data, key_name)
         assertNumpyArraysEqual(data.data, VIS006_REFLECTANCES)
 
     def test_ir_calibrate(self):
@@ -146,7 +150,7 @@ class TestNativeMSGFileHandler(unittest.TestCase):
 
         key_name = 'IR_108'
         data = IR_108_RADIANCES[:]
-        self.reader._ir_calibrate(data, key_name)
+        data = self.reader._ir_calibrate(data, key_name)
         assertNumpyArraysEqual(data.data, IR_108_TBS)
 
     def tearDown(self):

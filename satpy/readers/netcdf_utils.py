@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Copyright (c) 2016.
+# Copyright (c) 2016-2017.
 
 # Author(s):
 
@@ -26,10 +26,12 @@
 
 """
 import netCDF4
-import numpy as np
 import logging
+import xarray as xr
 
+from satpy import CHUNK_SIZE
 from satpy.readers.file_handlers import BaseFileHandler
+from satpy.readers.utils import np2str
 
 LOG = logging.getLogger(__name__)
 
@@ -67,7 +69,12 @@ class NetCDF4FileHandler(BaseFileHandler):
         super(NetCDF4FileHandler, self).__init__(
             filename, filename_info, filetype_info)
         self.file_content = {}
-        file_handle = netCDF4.Dataset(self.filename, 'r')
+        try:
+            file_handle = netCDF4.Dataset(self.filename, 'r')
+        except IOError:
+            LOG.exception(
+                'Failed reading file %s. Possibly corrupted file', self.filename)
+            raise
 
         self.auto_maskandscale = auto_maskandscale
         if hasattr(file_handle, "set_auto_maskandscale"):
@@ -82,11 +89,11 @@ class NetCDF4FileHandler(BaseFileHandler):
         """
         for key in obj.ncattrs():
             value = getattr(obj, key)
-            value = np.squeeze(value)
-            if issubclass(value.dtype.type, str) or np.issubdtype(value.dtype, np.character):
-                self.file_content["{}/attr/{}".format(name, key)] = str(value)
-            else:
-                self.file_content["{}/attr/{}".format(name, key)] = value
+            fc_key = "{}/attr/{}".format(name, key)
+            try:
+                self.file_content[fc_key] = np2str(value)
+            except ValueError:
+                self.file_content[fc_key] = value
 
     def collect_metadata(self, name, obj):
         """Collect all file variables and attributes for the provided file object.
@@ -100,6 +107,7 @@ class NetCDF4FileHandler(BaseFileHandler):
         for var_name, var_obj in obj.variables.items():
             var_name = base_name + var_name
             self.file_content[var_name] = var_obj
+            self.file_content[var_name + "/dtype"] = var_obj.dtype
             self.file_content[var_name + "/shape"] = var_obj.shape
             self._collect_attrs(var_name, var_obj)
         self._collect_attrs(name, obj)
@@ -114,9 +122,14 @@ class NetCDF4FileHandler(BaseFileHandler):
         if isinstance(val, netCDF4.Variable):
             # these datasets are closed and inaccessible when the file is
             # closed, need to reopen
-            v = netCDF4.Dataset(self.filename, 'r')
-            val = v[key]
-            val.set_auto_maskandscale(self.auto_maskandscale)
+            # TODO: Handle HDF4 versus NetCDF3 versus NetCDF4
+            parts = key.rsplit('/', 1)
+            if len(parts) == 2:
+                group, key = parts
+            else:
+                group = None
+            val = xr.open_dataset(self.filename, group=group, chunks=CHUNK_SIZE,
+                                  mask_and_scale=self.auto_maskandscale)[key]
         return val
 
     def __contains__(self, item):

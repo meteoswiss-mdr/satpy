@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Copyright (c) 2016.
+# Copyright (c) 2016-2017.
 
 # Author(s):
 
@@ -29,8 +29,12 @@ import logging
 import h5py
 import numpy as np
 import six
+import xarray as xr
+import dask.array as da
 
 from satpy.readers.file_handlers import BaseFileHandler
+from satpy.readers.utils import np2str
+from satpy import CHUNK_SIZE
 
 LOG = logging.getLogger(__name__)
 
@@ -40,9 +44,16 @@ class HDF5FileHandler(BaseFileHandler):
     """
 
     def __init__(self, filename, filename_info, filetype_info):
-        super(HDF5FileHandler, self).__init__(filename, filename_info, filetype_info)
+        super(HDF5FileHandler, self).__init__(
+            filename, filename_info, filetype_info)
         self.file_content = {}
-        file_handle = h5py.File(self.filename, 'r')
+        try:
+            file_handle = h5py.File(self.filename, 'r')
+        except IOError:
+            LOG.exception(
+                'Failed reading file %s. Possibly corrupted file', self.filename)
+            raise
+
         file_handle.visititems(self.collect_metadata)
         self._collect_attrs('', file_handle.attrs)
         file_handle.close()
@@ -50,19 +61,16 @@ class HDF5FileHandler(BaseFileHandler):
     def _collect_attrs(self, name, attrs):
         for key, value in six.iteritems(attrs):
             value = np.squeeze(value)
-            if issubclass(value.dtype.type, np.string_) and not value.shape:
-                value = np.asscalar(value)
-                if not isinstance(value, str):
-                    # python 3 - was scalar numpy array of bytes
-                    # otherwise python 2 - scalar numpy array of 'str'
-                    value = value.decode()
-                self.file_content["{}/attr/{}".format(name, key)] = value
-            else:
-                self.file_content["{}/attr/{}".format(name, key)] = value
+            fc_key = "{}/attr/{}".format(name, key)
+            try:
+                self.file_content[fc_key] = np2str(value)
+            except ValueError:
+                self.file_content[fc_key] = value
 
     def collect_metadata(self, name, obj):
         if isinstance(obj, h5py.Dataset):
             self.file_content[name] = obj
+            self.file_content[name + "/dtype"] = obj.dtype
             self.file_content[name + "/shape"] = obj.shape
         self._collect_attrs(name, obj.attrs)
 
@@ -70,7 +78,13 @@ class HDF5FileHandler(BaseFileHandler):
         val = self.file_content[key]
         if isinstance(val, h5py.Dataset):
             # these datasets are closed and inaccessible when the file is closed, need to reopen
-            return h5py.File(self.filename, 'r')[key].value
+            dset = h5py.File(self.filename, 'r')[key]
+            dset = da.from_array(dset, chunks=CHUNK_SIZE)
+            if dset.ndim > 1:
+                return xr.DataArray(dset, dims=['y', 'x'])
+            else:
+                return xr.DataArray(dset)
+
         return val
 
     def __contains__(self, item):

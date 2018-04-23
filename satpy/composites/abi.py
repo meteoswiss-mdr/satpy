@@ -23,23 +23,24 @@
 """
 
 import logging
-
-from pyresample.geometry import AreaDefinition
-
-from satpy.composites import RGBCompositor
-from satpy.dataset import Dataset
+from satpy.composites import GenericCompositor, IncompatibleAreas
 
 LOG = logging.getLogger(__name__)
 
 
-class TrueColor(RGBCompositor):
+class SimulatedGreen(GenericCompositor):
 
-    def __call__(self, projectables, **info):
+    """A single-band dataset resembles a Green (0.55 µm)."""
 
-        c01, c02, c03 = projectables
+    def __call__(self, projectables, optional_datasets=None, **attrs):
+        c01, c02, c03 = self.check_areas(projectables)
 
-        r = c02
-        b = c01
-        g = (c01 + c02) / 2 * 0.93 + 0.07 * c03
+        # Kaba:
+        # res = (c01 + c02) * 0.45 + 0.1 * c03
+        # EDC:
+        # res = c01 * 0.45706946 + c02 * 0.48358168 + 0.06038137 * c03
+        # Original attempt:
+        res = (c01 + c02) / 2 * 0.93 + 0.07 * c03
+        res.attrs = c03.attrs.copy()
 
-        return super(TrueColor, self).__call__((r, g, b), **info)
+        return super(SimulatedGreen, self).__call__((res,), **attrs)

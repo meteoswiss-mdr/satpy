@@ -28,19 +28,21 @@ import logging
 import numbers
 import os
 from abc import ABCMeta, abstractmethod, abstractproperty
-from collections import deque, namedtuple
+from collections import deque, namedtuple, OrderedDict
 from fnmatch import fnmatch
 
-import numpy as np
 import six
+import xarray as xr
 import yaml
+from weakref import WeakValueDictionary
 
-from pyresample.geometry import SwathDefinition, StackedAreaDefinition
+from pyresample.geometry import StackedAreaDefinition, SwathDefinition
 from satpy.config import recursive_dict_update
-from satpy.dataset import DATASET_KEYS, Dataset, DatasetID
+from satpy.dataset import DATASET_KEYS, DatasetID
 from satpy.readers import DatasetDict
-from satpy.readers.helper_functions import get_area_slices, get_sub_area
+from satpy.readers.utils import get_area_slices, get_sub_area
 from trollsift.parser import globify, parse
+from satpy import CHUNK_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +83,9 @@ def match_filenames(filenames, pattern):
 
 
 class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
-    __metaclass__ = ABCMeta
 
-    def __init__(self,
-                 config_files,
-                 start_time=None,
-                 end_time=None,
-                 area=None):
+    def __init__(self, config_files):
         self.config = {}
-        self._start_time = start_time
-        self._end_time = end_time
-        self._area = area
         self.config_files = config_files
         for config_file in config_files:
             with open(config_file) as fd:
@@ -105,15 +99,19 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
             # correct separator if needed
             file_patterns = [os.path.join(*pattern.split('/'))
                              for pattern in filetype_info['file_patterns']]
+            filetype_info['file_patterns'] = file_patterns
             self.file_patterns.extend(file_patterns)
 
         if not isinstance(self.info['sensors'], (list, tuple)):
             self.info['sensors'] = [self.info['sensors']]
-        self.sensor_names = self.info['sensors']
         self.datasets = self.config.get('datasets', {})
         self.info['filenames'] = []
         self.ids = {}
         self.load_ds_ids_from_config()
+
+    @property
+    def sensor_names(self):
+        return self.info['sensors']
 
     @property
     def all_dataset_ids(self):
@@ -141,6 +139,14 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
     @abstractproperty
     def end_time(self):
         """End time of the reader."""
+
+    @abstractmethod
+    def filter_selected_filenames(self, filenames):
+        """Filter provided filenames by parameters in reader configuration.
+
+        Returns: iterable of usable files
+
+        """
 
     @abstractmethod
     def load(self, dataset_keys):
@@ -176,10 +182,11 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
 
         for pattern in self.file_patterns:
             matching = match_filenames(filenames, pattern)
-            selected_filenames.extend(matching)
+            for fname in matching:
+                if fname not in selected_filenames:
+                    selected_filenames.append(fname)
         if len(selected_filenames) == 0:
             logger.warning("No filenames found for reader: %s", self.name)
-
         return selected_filenames
 
     def get_ds_ids_by_wavelength(self, wavelength, ids=None):
@@ -291,6 +298,9 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
 
     def filter_ds_ids(self, dataset_ids, dfilter):
         """Filter *dataset_ids* based on *dfilter*."""
+        # sort by resolution, highest resolution first (lowest number)
+        dataset_ids = sorted(dataset_ids, key=lambda x: x.resolution or -1)
+
         for attr in ['resolution', 'polarization']:
             if dfilter.get(attr) is not None:
                 dataset_ids = [ds_id for ds_id in dataset_ids
@@ -373,23 +383,38 @@ class AbstractYAMLReader(six.with_metaclass(ABCMeta, object)):
 
 
 class FileYAMLReader(AbstractYAMLReader):
-
     """Implementation of the YAML reader."""
 
     def __init__(self,
                  config_files,
-                 start_time=None,
-                 end_time=None,
-                 area=None,
-                 filter_filenames=True, **kwargs):
-        super(FileYAMLReader, self).__init__(config_files,
-                                             start_time=start_time,
-                                             end_time=end_time,
-                                             area=area)
+                 filter_parameters=None,
+                 filter_filenames=True,
+                 **kwargs):
+        super(FileYAMLReader, self).__init__(config_files)
 
         self.file_handlers = {}
-        self.filter_filenames = self.info.get(
-            'filter_filenames', filter_filenames)
+        self.filter_filenames = self.info.get('filter_filenames', filter_filenames)
+        self.filter_parameters = filter_parameters or {}
+        if kwargs:
+            logger.warning("Unrecognized/unused reader keyword argument(s) '{}'".format(kwargs))
+        self.coords_cache = WeakValueDictionary()
+
+    @property
+    def sensor_names(self):
+        if not self.file_handlers:
+            return self.info['sensors']
+
+        file_handlers = (handlers[0] for handlers in
+                         self.file_handlers.values())
+        sensor_names = set()
+        for fh in file_handlers:
+            try:
+                sensor_names.update(fh.sensor_names)
+            except NotImplementedError:
+                continue
+        if not sensor_names:
+            return self.info['sensors']
+        return sorted(sensor_names)
 
     @property
     def available_dataset_ids(self):
@@ -412,25 +437,26 @@ class FileYAMLReader(AbstractYAMLReader):
             raise RuntimeError("End time unknown until files are selected")
         return max(x[-1].end_time for x in self.file_handlers.values())
 
-    def check_file_covers_area(self, file_handler):
+    @staticmethod
+    def check_file_covers_area(file_handler, check_area):
         """Checks if the file covers the current area.
 
-        If the file doesn't provide any bounding box information or self._area
-        is None, the check returns True.
+        If the file doesn't provide any bounding box information or 'area'
+        was not provided in `filter_parameters`, the check returns True.
         """
-        if self._area:
-            from trollsched.boundary import AreaDefBoundary, Boundary
-            from satpy.resample import get_area_def
-            try:
-                gbb = Boundary(*file_handler.get_bounding_box())
-            except NotImplementedError:
-                pass
-            else:
-                abb = AreaDefBoundary(get_area_def(self._area), frequency=1000)
+        from trollsched.boundary import AreaDefBoundary, Boundary
+        from satpy.resample import get_area_def
+        try:
+            gbb = Boundary(*file_handler.get_bounding_box())
+        except NotImplementedError as err:
+            logger.debug("Bounding box computation not implemented: %s",
+                         str(err))
+        else:
+            abb = AreaDefBoundary(get_area_def(check_area), frequency=1000)
 
-                intersection = gbb.contour_poly.intersection(abb.contour_poly)
-                if not intersection:
-                    return False
+            intersection = gbb.contour_poly.intersection(abb.contour_poly)
+            if not intersection:
+                return False
         return True
 
     def find_required_filehandlers(self, requirements, filename_info):
@@ -476,10 +502,18 @@ class FileYAMLReader(AbstractYAMLReader):
     @staticmethod
     def filename_items_for_filetype(filenames, filetype_info):
         """Iterator over the filenames matching *filetype_info*."""
+        matched_files = []
         for pattern in filetype_info['file_patterns']:
             for filename in match_filenames(filenames, pattern):
-                filename_info = parse(pattern, get_filebase(filename, pattern))
-
+                if filename in matched_files:
+                    continue
+                try:
+                    filename_info = parse(
+                        pattern, get_filebase(filename, pattern))
+                except ValueError:
+                    logger.debug("Can't parse %s with %s.", filename, pattern)
+                    continue
+                matched_files.append(filename)
                 yield filename, filename_info
 
     def new_filehandler_instances(self, filetype_info, filename_items):
@@ -499,55 +533,92 @@ class FileYAMLReader(AbstractYAMLReader):
 
             yield filetype_cls(filename, filename_info, filetype_info, *req_fh)
 
-    def filter_fh_by_time(self, filehandlers):
-        """Filter out filehandlers outside the desired time_range."""
-        for filehandler in filehandlers:
-            if self._start_time and filehandler.end_time < self._start_time:
+    def time_matches(self, fstart, fend):
+        start_time = self.filter_parameters.get('start_time')
+        end_time = self.filter_parameters.get('end_time')
+        if start_time and fend and fend < start_time:
+            return False
+        if end_time and fstart and fstart > end_time:
+            return False
+        return True
+
+    def metadata_matches(self, sample_dict, file_handler=None):
+        # special handling of start/end times
+        if not self.time_matches(
+                sample_dict.get('start_time'), sample_dict.get('end_time')):
+            return False
+        for key, val in self.filter_parameters.items():
+            if key != 'area' and key not in sample_dict:
                 continue
-            if self._end_time and filehandler.start_time > self._end_time:
+
+            if key in ['start_time', 'end_time']:
                 continue
-            yield filehandler
+            elif key == 'area' and file_handler:
+                if not self.check_file_covers_area(file_handler, val):
+                    logger.info('Filtering out %s based on area',
+                                file_handler.filename)
+                    break
+            elif key in sample_dict and val != sample_dict[key]:
+                # don't use this file
+                break
+        else:
+            # all the metadata keys are equal
+            return True
+        return False
 
     def filter_filenames_by_info(self, filename_items):
         """Filter out file using metadata from the filenames.
 
-        Currently only uses start and end time.
+        Currently only uses start and end time. If only start time is available
+        from the filename, keep all the filename that have a start time before
+        the requested end time.
         """
         for filename, filename_info in filename_items:
-            s = filename_info.get('start_time')
-            e = filename_info.get('end_time', s)
-            if e and not s:
-                s = e
-
-            if e < s:
+            fend = filename_info.get('end_time')
+            fstart = filename_info.setdefault('start_time', fend)
+            if fend and fend < fstart:
                 # correct for filenames with 1 date and 2 times
-                e = e.replace(year=s.year, month=s.month, day=s.day)
-            if self._start_time and e < self._start_time:
-                continue
-            if self._end_time and s > self._end_time:
-                continue
-            yield filename, filename_info
+                fend = fend.replace(year=fstart.year,
+                                    month=fstart.month,
+                                    day=fstart.day)
+                filename_info['end_time'] = fend
+            if self.metadata_matches(filename_info):
+                yield filename, filename_info
 
-    def filter_fh_by_area(self, filehandlers):
-        """Filter out filehandlers outside the desired area."""
+    def filter_fh_by_metadata(self, filehandlers):
+        """Filter out filehandlers using provide filter parameters."""
         for filehandler in filehandlers:
-            if self.check_file_covers_area(filehandler):
+            filehandler.metadata['start_time'] = filehandler.start_time
+            filehandler.metadata['end_time'] = filehandler.end_time
+            if self.metadata_matches(filehandler.metadata, filehandler):
                 yield filehandler
+
+    def filter_selected_filenames(self, filenames):
+        for filetype, filetype_info in self.sorted_filetype_items():
+            filename_iter = self.filename_items_for_filetype(filenames,
+                                                             filetype_info)
+            if self.filter_filenames:
+                filename_iter = self.filter_filenames_by_info(filename_iter)
+
+            for fn, _ in filename_iter:
+                yield fn
 
     def new_filehandlers_for_filetype(self, filetype_info, filenames):
         """Create filehandlers for a given filetype."""
         filename_iter = self.filename_items_for_filetype(filenames,
                                                          filetype_info)
-        if self.filter_filenames and self._start_time or self._end_time:
+        if self.filter_filenames:
+            # preliminary filter of filenames based on start/end time
+            # to reduce the number of files to open
             filename_iter = self.filter_filenames_by_info(filename_iter)
         filehandler_iter = self.new_filehandler_instances(filetype_info,
                                                           filename_iter)
-        return [fhd
-                for fhd in self.filter_fh_by_area(self.filter_fh_by_time(
-                    filehandler_iter))]
+        filtered_iter = self.filter_fh_by_metadata(filehandler_iter)
+        return list(filtered_iter)
 
     def create_filehandlers(self, filenames):
         """Organize the filenames into file types and create file handlers."""
+        filenames = list(OrderedDict.fromkeys(filenames))
         logger.debug("Assigning to %s: %s", self.info['name'], filenames)
 
         self.info.setdefault('filenames', []).extend(filenames)
@@ -564,98 +635,33 @@ class FileYAMLReader(AbstractYAMLReader):
                     key=lambda fhd: (fhd.start_time, fhd.filename))
 
     @staticmethod
-    def get_shape_n_slices(all_shapes, xslice=slice(None), yslice=slice(None)):
-        """Get the shape and slices to use."""
-        # rows accumlate, columns stay the same
-        overall_shape = [sum([x[0]
-                              for x in all_shapes]), ] + all_shapes[0][1:]
-        if xslice.start is not None and yslice.start is not None:
-            slice_shape = [yslice.stop - yslice.start,
-                           xslice.stop - xslice.start]
-            overall_shape[0] = min(overall_shape[0], slice_shape[0])
-            overall_shape[1] = min(overall_shape[1], slice_shape[1])
-        elif len(overall_shape) == 1:
-            yslice = slice(0, overall_shape[0])
-        else:
-            xslice = slice(0, overall_shape[1])
-            yslice = slice(0, overall_shape[0])
-        return overall_shape, xslice, yslice
-
-    @staticmethod
-    def _load_entire_dataset(dsid, ds_info, file_handlers):
-        """Load the entire dataset as inplace loading isn't an option."""
-        # can't optimize by using inplace loading
-        projectables = []
-        for fh in file_handlers:
-            projectable = fh.get_dataset(dsid, ds_info)
-            if projectable is not None:
-                projectables.append(projectable)
-
-        # Join them all together
-        combined_info = file_handlers[0].combine_info(
-            [p.info for p in projectables])
-        cls = ds_info.get("container", Dataset)
-        return cls(np.ma.vstack(projectables), **combined_info)
-
-    def _load_sliced_dataset(self, dsid, ds_info, file_handlers, xslice, yslice):
+    def _load_dataset(dsid, ds_info, file_handlers, dim='y'):
         """Load only a piece of the dataset."""
-        # we can optimize
-        cls = ds_info.get("container", Dataset)
-        all_shapes = [list(fhd.get_shape(dsid, ds_info))
-                      for fhd in file_handlers]
-        overall_shape, xslice, yslice = self.get_shape_n_slices(all_shapes,
-                                                                xslice,
-                                                                yslice)
-
-        out_info = {}
-        data = np.empty(overall_shape,
-                        dtype=ds_info.get('dtype', np.float32))
-        mask = np.ma.make_mask_none(overall_shape)
-
-        offset = 0
-        out_offset = 0
+        slice_list = []
         failure = True
-        for idx, fh in enumerate(file_handlers):
-            segment_height = all_shapes[idx][0]
-            # XXX: Does this work with masked arrays and subclasses of them?
-            # Otherwise, have to send in separate data, mask, and info parameters to be filled in
-            # TODO: Combine info in a sane way
-
-            if (yslice.start >= offset + segment_height or
-                    yslice.stop <= offset):
-                offset += segment_height
-                continue
-            start = max(yslice.start - offset, 0)
-            stop = min(yslice.stop - offset, segment_height)
-
-            shuttle = Shuttle(data[out_offset:out_offset + stop - start],
-                              mask[out_offset:out_offset + stop - start],
-                              out_info)
-
-            kwargs = {}
-            if stop - start != segment_height:
-                kwargs['yslice'] = slice(start, stop)
-            if (xslice.start is not None and
-                    xslice.stop - xslice.start != all_shapes[idx][1]):
-                kwargs['xslice'] = xslice
-
+        for fh in file_handlers:
             try:
-                fh.get_dataset(dsid, ds_info, out=shuttle, **kwargs)
-                failure = False
+                projectable = fh.get_dataset(dsid, ds_info)
+                if projectable is not None:
+                    slice_list.append(projectable)
+                    failure = False
             except KeyError:
-                logger.warning(
-                    "Failed to load {} from {}".format(dsid, fh), exc_info=True)
-                mask[out_offset:out_offset + stop - start] = True
-
-            out_offset += stop - start
-            offset += segment_height
+                logger.warning("Failed to load {} from {}".format(dsid, fh),
+                               exc_info=True)
 
         if failure:
             raise KeyError(
                 "Could not load {} from any provided files".format(dsid))
 
-        out_info.pop('area', None)
-        return cls(data, mask=mask, copy=False, **out_info)
+        if dim not in slice_list[0].dims:
+            return slice_list[0]
+        res = xr.concat(slice_list, dim=dim)
+
+        combined_info = file_handlers[0].combine_info(
+            [p.attrs for p in slice_list])
+
+        res.attrs = combined_info
+        return res
 
     def _load_dataset_data(self,
                            file_handlers,
@@ -663,20 +669,11 @@ class FileYAMLReader(AbstractYAMLReader):
                            xslice=slice(None),
                            yslice=slice(None)):
         ds_info = self.ids[dsid]
-        try:
-            # Can we allow the file handlers to do inplace data writes?
-            [list(fhd.get_shape(dsid, ds_info)) for fhd in file_handlers]
-        except NotImplementedError:
-            # FIXME: Is NotImplementedError included in Exception for all
-            # versions of Python?
-            proj = self._load_entire_dataset(dsid, ds_info, file_handlers)
-        else:
-            proj = self._load_sliced_dataset(dsid, ds_info, file_handlers,
-                                             xslice, yslice)
+        proj = self._load_dataset(dsid, ds_info, file_handlers)
         # FIXME: areas could be concatenated here
         # Update the metadata
-        proj.info['start_time'] = file_handlers[0].start_time
-        proj.info['end_time'] = file_handlers[-1].end_time
+        proj.attrs['start_time'] = file_handlers[0].start_time
+        proj.attrs['end_time'] = file_handlers[-1].end_time
 
         return proj
 
@@ -685,7 +682,6 @@ class FileYAMLReader(AbstractYAMLReader):
 
         At the moment, it just returns the first filetype that has been loaded.
         """
-
         if not isinstance(filetypes, list):
             filetypes = [filetypes]
 
@@ -710,11 +706,12 @@ class FileYAMLReader(AbstractYAMLReader):
         cids = []
 
         for cinfo in ds_info.get('coordinates', []):
-            if isinstance(cinfo, dict):
-                cinfo['resolution'] = ds_info['resolution']
-            else:
-                # cid = self.get_dataset_key(cinfo)
-                cinfo = {'name': cinfo, 'resolution': ds_info['resolution']}
+            if not isinstance(cinfo, dict):
+                cinfo = {'name': cinfo}
+
+            cinfo['resolution'] = ds_info['resolution']
+            if 'polarization' in ds_info:
+                cinfo['polarization'] = ds_info['polarization']
             cid = DatasetID(**cinfo)
             cids.append(self.get_dataset_key(cid))
 
@@ -740,17 +737,26 @@ class FileYAMLReader(AbstractYAMLReader):
             return self.file_handlers[filetype]
 
     def _make_area_from_coords(self, coords):
-        """Create an apropriate area with the given *coords*."""
+        """Create an appropriate area with the given *coords*."""
         if len(coords) == 2:
-            lon_sn = coords[0].info.get('standard_name')
-            lat_sn = coords[1].info.get('standard_name')
+            lon_sn = coords[0].attrs.get('standard_name')
+            lat_sn = coords[1].attrs.get('standard_name')
             if lon_sn == 'longitude' and lat_sn == 'latitude':
-                sdef = SwathDefinition(*coords)
-                sensor_str = sdef.name = '_'.join(self.info['sensors'])
+                key = None
+                try:
+                    key = (coords[0].data.name, coords[1].data.name)
+                    sdef = self.coords_cache.get(key)
+                except AttributeError:
+                    sdef = None
+                if sdef is None:
+                    sdef = SwathDefinition(*coords)
+                    if key is not None:
+                        self.coords_cache[key] = sdef
+                sensor_str = '_'.join(self.info['sensors'])
                 shape_str = '_'.join(map(str, coords[0].shape))
                 sdef.name = "{}_{}_{}_{}".format(sensor_str, shape_str,
-                                                 coords[0].info['name'],
-                                                 coords[1].info['name'])
+                                                 coords[0].attrs['name'],
+                                                 coords[1].attrs['name'])
                 return sdef
             else:
                 raise ValueError(
@@ -766,7 +772,8 @@ class FileYAMLReader(AbstractYAMLReader):
             return self._load_area_def(dsid, file_handlers)
         except NotImplementedError:
             if any(x is None for x in coords):
-                logger.warning("Failed to load coordinates for '{}'".format(dsid))
+                logger.warning(
+                    "Failed to load coordinates for '{}'".format(dsid))
                 return None
 
             area = self._make_area_from_coords(coords)
@@ -788,9 +795,9 @@ class FileYAMLReader(AbstractYAMLReader):
         """
         slice_kwargs = {}
 
-        if area is not None and self._area is not None:
+        if area is not None and self.filter_parameters.get('area') is not None:
             try:
-                slices = get_area_slices(area, self._area)
+                slices = get_area_slices(area, self.filter_parameters['area'])
                 area = get_sub_area(area, *slices)
                 slice_kwargs['xslice'], slice_kwargs['yslice'] = slices
             except (NotImplementedError, AttributeError):
@@ -814,12 +821,44 @@ class FileYAMLReader(AbstractYAMLReader):
             return None
 
         if area is not None:
-            ds.info['area'] = area
+            ds.attrs['area'] = area
+            if (('x' not in ds.coords) or('y' not in ds.coords)) and \
+                    hasattr(area, 'get_proj_vectors_dask'):
+                ds['x'], ds['y'] = area.get_proj_vectors_dask(CHUNK_SIZE)
         return ds
 
-    def load(self, dataset_keys):
-        """Load *dataset_keys*."""
-        all_datasets = DatasetDict()
+    def _load_ancillary_variables(self, datasets):
+        """Load the ancillary variables of `datasets`."""
+        all_av_ids = set()
+        for dataset in datasets.values():
+            ancillary_variables = dataset.attrs.get('ancillary_variables', [])
+            if not isinstance(ancillary_variables, (list, tuple, set)):
+                ancillary_variables = ancillary_variables.split(',')
+            av_ids = []
+            for key in ancillary_variables:
+                try:
+                    av_ids.append(self.get_dataset_key(key))
+                except KeyError:
+                    logger.warning("Can't load ancillary dataset %s", str(key))
+
+            all_av_ids |= set(av_ids)
+            dataset.attrs['ancillary_variables'] = av_ids
+        all_av_ids = [av_id for av_id in all_av_ids if av_id not in datasets]
+        if not all_av_ids:
+            return
+        av_ds = self.load(all_av_ids, datasets)
+        for dataset in datasets.values():
+            new_vars = []
+            for av_id in dataset.attrs.get('ancillary_variables', []):
+                new_vars.append(av_ds.get(av_id, datasets.get(av_id, av_id)))
+            dataset.attrs['ancillary_variables'] = new_vars
+        datasets.update(av_ds)
+
+    def load(self, dataset_keys, previous_datasets=None):
+        """Load `dataset_keys`.
+
+        If `previous_datasets` is provided, do not reload those."""
+        all_datasets = previous_datasets or DatasetDict()
         datasets = DatasetDict()
 
         # Include coordinates in the list of datasets to load
@@ -828,6 +867,8 @@ class FileYAMLReader(AbstractYAMLReader):
         all_dsids = list(set().union(*coordinates.values())) + dsids
 
         for dsid in all_dsids:
+            if dsid in all_datasets:
+                continue
             coords = [all_datasets.get(cid, None)
                       for cid in coordinates.get(dsid, [])]
             ds = self._load_dataset_with_area(dsid, coords)
@@ -835,5 +876,6 @@ class FileYAMLReader(AbstractYAMLReader):
                 all_datasets[dsid] = ds
                 if dsid in dsids:
                     datasets[dsid] = ds
+        self._load_ancillary_variables(all_datasets)
 
         return datasets

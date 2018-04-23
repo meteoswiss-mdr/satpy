@@ -5,13 +5,18 @@
 
 import os
 import sys
-import mock
 import numpy as np
 from satpy.tests.reader_tests.test_hdf5_utils import FakeHDF5FileHandler
 if sys.version_info < (2, 7):
     import unittest2 as unittest
 else:
     import unittest
+
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 
 DEFAULT_FILE_DTYPE = np.uint16
 DEFAULT_FILE_SHAPE = (10, 300)
@@ -82,6 +87,15 @@ class FakeHDF5FileHandler2(FakeHDF5FileHandler):
             file_content['GEOLOCATION_DATA/Latitude/attr/_FillValue'] = -999.
             file_content['GEOLOCATION_DATA/Latitude/attr/Title'] = 'Geodetic Latitude'
             file_content['GEOLOCATION_DATA/Latitude/attr/Units'] = 'deg'
+
+        # convert to xarrays
+        from xarray import DataArray
+        for key, val in file_content.items():
+            if isinstance(val, np.ndarray):
+                if val.ndim > 1:
+                    file_content[key] = DataArray(val, dims=('y', 'x'))
+                else:
+                    file_content[key] = DataArray(val)
         return file_content
 
 
@@ -133,10 +147,10 @@ class TestOMPSEDRReader(unittest.TestCase):
         ds = r.load(['so2_trm'])
         self.assertEqual(len(ds), 1)
         for d in ds.values():
-            self.assertEqual(d.info['resolution'], 50000)
+            self.assertEqual(d.attrs['resolution'], 50000)
             self.assertTupleEqual(d.shape, DEFAULT_FILE_SHAPE)
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
     def test_basic_load_to3(self):
         """Test basic load of to3 datasets"""
@@ -151,10 +165,10 @@ class TestOMPSEDRReader(unittest.TestCase):
         ds = r.load(['reflectivity_331', 'uvaerosol_index'])
         self.assertEqual(len(ds), 2)
         for d in ds.values():
-            self.assertEqual(d.info['resolution'], 50000)
+            self.assertEqual(d.attrs['resolution'], 50000)
             self.assertTupleEqual(d.shape, DEFAULT_FILE_SHAPE)
-            self.assertIn('area', d.info)
-            self.assertIsNotNone(d.info['area'])
+            self.assertIn('area', d.attrs)
+            self.assertIsNotNone(d.attrs['area'])
 
 
 def suite():

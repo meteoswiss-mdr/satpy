@@ -7,35 +7,35 @@ reader:
 
 file_types:
     nc_nwcsaf_cma:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CMA_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_ct:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CT_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_ctth:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CTTH_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_cmic:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CMIC_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_pc:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_PC_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_crr:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CRR_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_ishai:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_iSHAI_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_ci:
-        file_reader: !!python/name:satpy.readers.nc_nwcsaf_msg.NcNWCSAFMSG
+        file_reader: !!python/name:satpy.readers.nc_nwcsaf.NcNWCSAF
         file_patterns: ['S_NWC_CI_{platform_id}_{region_id}_{start_time:%Y%m%dT%H%M%S}Z.nc']
 
     nc_nwcsaf_rdt:
@@ -59,6 +59,42 @@ datasets:
 
   cma_pal:
     name: cma_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_cloudsnow:
+    name: cma_cloudsnow
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_cloudsnow_pal:
+    name: cma_cloudsnow_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_dust:
+    name: cma_dust
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_dust_pal:
+    name: cma_dust_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_volcanic:
+    name: cma_volcanic
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_cma
+
+  cma_volcanic_pal:
+    name: cma_volcanic_pal
     sensor: seviri
     resolution: 3000
     file_type: nc_nwcsaf_cma
@@ -111,6 +147,18 @@ datasets:
 
   ctth_tempe_pal:
     name: ctth_tempe_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ctth
+
+  ctth_effectiv:
+    name: ctth_effectiv
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ctth
+
+  ctth_effectiv_pal:
+    name: ctth_effectiv_pal
     sensor: seviri
     resolution: 3000
     file_type: nc_nwcsaf_ctth
@@ -205,8 +253,8 @@ datasets:
     resolution: 3000
     file_type: nc_nwcsaf_crr
 
-  crr_accum:
-    name: crr_accum
+  crr_intensity:
+    name: crr_intensity
     sensor: seviri
     resolution: 3000
     file_type: nc_nwcsaf_crr
@@ -254,6 +302,91 @@ datasets:
     sensor: seviri
     resolution: 3000
     file_type: nc_nwcsaf_ishai
+
+  ishai_ki:
+    name: ishai_ki
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_ki_pal:
+    name: ishai_ki_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_shw:
+    name: ishai_shw
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_shw_pal:
+    name: ishai_shw_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_bl:
+    name: ishai_bl
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_bl_pal:
+    name: ishai_bl_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_ml:
+    name: ishai_ml
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_ml_pal:
+    name: ishai_ml_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_hl:
+    name: ishai_hl
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_hl_pal:
+    name: ishai_hl_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_toz:
+    name: ishai_toz
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_toz_pal:
+    name: ishai_toz_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_skt:
+    name: ishai_skt
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
+  ishai_skt_pal:
+    name: ishai_skt_pal
+    sensor: seviri
+    resolution: 3000
+    file_type: nc_nwcsaf_ishai
+
 
 # ----CI products ------------
 
@@ -308,5 +441,4 @@ datasets:
     sensor: seviri
     resolution: 3000
     file_type: nc_nwcsaf_asii
-
 

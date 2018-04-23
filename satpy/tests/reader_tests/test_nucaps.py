@@ -9,9 +9,15 @@ if sys.version_info < (2, 7):
     import unittest2 as unittest
 else:
     import unittest
-import mock
+
 import numpy as np
 from satpy.tests.reader_tests.test_netcdf_utils import FakeNetCDF4FileHandler
+
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 
 DEFAULT_FILE_DTYPE = np.float32
 DEFAULT_FILE_SHAPE = (120,)
@@ -122,6 +128,21 @@ class FakeNetCDF4FileHandler2(FakeNetCDF4FileHandler):
         file_content[k + '/attr/valid_range'] = (-90., 90.)
         file_content[k + '/attr/standard_name'] = 'latitude'
         file_content[k + '/attr/_FillValue'] = -9999.
+
+        # convert to xarrays
+        from xarray import DataArray
+        for key, val in file_content.items():
+            if isinstance(val, np.ndarray):
+                attrs = {}
+                for a in ['_FillValue', 'flag_meanings', 'flag_values', 'units']:
+                    if key + '/attr/' + a in file_content:
+                        attrs[a] = file_content[key + '/attr/' + a]
+                if val.ndim == 1:
+                    file_content[key] = DataArray(val, dims=('number_of_FORs',), attrs=attrs)
+                elif val.ndim > 1:
+                    file_content[key] = DataArray(val, dims=('number_of_FORs', 'number_of_p_levels'), attrs=attrs)
+                else:
+                    file_content[key] = DataArray(val, attrs=attrs)
 
         return file_content
 

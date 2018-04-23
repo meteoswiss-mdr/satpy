@@ -27,11 +27,13 @@ import unittest
 from datetime import datetime
 from tempfile import mkdtemp
 
-import numpy as np
-from mock import MagicMock, patch
-
 import satpy.readers.yaml_reader as yr
 from satpy.dataset import DATASET_KEYS, DatasetID
+
+try:
+    from unittest.mock import MagicMock, patch
+except ImportError:
+    from mock import MagicMock, patch
 
 
 class FakeFH(object):
@@ -40,7 +42,9 @@ class FakeFH(object):
         self.start_time = start_time
         self.end_time = end_time
         self.get_bounding_box = MagicMock()
-        self.get_dataset = MagicMock()
+        fake_ds = MagicMock()
+        fake_ds.return_value.dims = ['x', 'y']
+        self.get_dataset = fake_ds
         self.combine_info = MagicMock()
 
 
@@ -90,6 +94,79 @@ class TestUtils(unittest.TestCase):
                          ['some', 'string'])
 
 
+class DummyReader():
+    def __init__(self, filename, filename_info, filetype_info):
+        self.filename = filename
+        self.filename_info = filename_info
+        self.filetype_info = filetype_info
+        self.start_time = datetime(2000, 1, 1, 12, 1)
+        self.end_time = datetime(2000, 1, 1, 12, 2)
+        self.metadata = {}
+
+
+class TestFileFileYAMLReaderMultiplePatterns(unittest.TestCase):
+    """Test units from FileYAMLReader with multiple readers."""
+
+    @patch('satpy.readers.yaml_reader.recursive_dict_update')
+    @patch('satpy.readers.yaml_reader.yaml', spec=yr.yaml)
+    def setUp(self, _, rec_up):  # pylint: disable=arguments-differ
+        """Setup a reader instance with a fake config."""
+        patterns = ['a{something:3s}.bla',
+                    'a0{something:2s}.bla']
+        res_dict = {'reader': {'name': 'fake',
+                               'sensors': ['canon']},
+                    'file_types': {'ftype1': {'name': 'ft1',
+                                              'file_patterns': patterns,
+                                              'file_reader': DummyReader}},
+                    'datasets': {'ch1': {'name': 'ch01',
+                                         'wavelength': [0.5, 0.6, 0.7],
+                                         'calibration': 'reflectance',
+                                         'file_type': 'ftype1',
+                                         'coordinates': ['lons', 'lats']},
+                                 'ch2': {'name': 'ch02',
+                                         'wavelength': [0.7, 0.75, 0.8],
+                                         'calibration': 'counts',
+                                         'file_type': 'ftype1',
+                                         'coordinates': ['lons', 'lats']},
+                                 'lons': {'name': 'lons',
+                                          'file_type': 'ftype2'},
+                                 'lats': {'name': 'lats',
+                                          'file_type': 'ftype2'}}}
+
+        rec_up.return_value = res_dict
+        self.config = res_dict
+        self.reader = yr.FileYAMLReader([__file__],
+                                        filter_parameters={
+                                            'start_time': datetime(2000, 1, 1),
+                                            'end_time': datetime(2000, 1, 2)})
+
+    def test_select_from_pathnames(self):
+        """Check select_files_from_pathnames."""
+        filelist = ['a001.bla', 'a002.bla', 'abcd.bla', 'k001.bla', 'a003.bli']
+
+        res = self.reader.select_files_from_pathnames(filelist)
+        for expected in ['a001.bla', 'a002.bla', 'abcd.bla']:
+            self.assertIn(expected, res)
+        self.assertEqual(len(res), 3)
+
+    def test_fn_items_for_ft(self):
+        """Check filename_items_for_filetype."""
+        filelist = ['a001.bla', 'a002.bla', 'abcd.bla', 'k001.bla', 'a003.bli']
+        ft_info = self.config['file_types']['ftype1']
+        fiter = self.reader.filename_items_for_filetype(filelist, ft_info)
+
+        filenames = dict(fname for fname in fiter)
+        self.assertEqual(len(filenames.keys()), 3)
+
+    def test_create_filehandlers(self):
+        """Check create_filehandlers."""
+        filelist = ['a001.bla', 'a002.bla', 'a001.bla', 'a002.bla',
+                    'abcd.bla', 'k001.bla', 'a003.bli']
+
+        self.reader.create_filehandlers(filelist)
+        self.assertEqual(len(self.reader.file_handlers['ftype1']), 3)
+
+
 class TestFileFileYAMLReader(unittest.TestCase):
     """Test units from FileYAMLReader."""
 
@@ -120,8 +197,10 @@ class TestFileFileYAMLReader(unittest.TestCase):
         rec_up.return_value = res_dict
         self.config = res_dict
         self.reader = yr.FileYAMLReader([__file__],
-                                        start_time=datetime(2000, 1, 1),
-                                        end_time=datetime(2000, 1, 2))
+                                        filter_parameters={
+                                            'start_time': datetime(2000, 1, 1),
+                                            'end_time': datetime(2000, 1, 2),
+                                        })
 
     def test_all_dataset_ids(self):
         """Check that all datasets ids are returned."""
@@ -193,15 +272,10 @@ class TestFileFileYAMLReader(unittest.TestCase):
         fh5 = FakeFH(datetime(1999, 12, 31, 10, 0),
                      datetime(2000, 1, 3, 12, 30))
 
-        res = self.reader.filter_fh_by_time([fh0, fh1, fh2, fh3, fh4, fh5])
-        self.assertSetEqual(set(res), set([fh1, fh2, fh3, fh5]))
-
-    def test_filter_fh_by_area(self):
-        """Check filtering filehandlers by area."""
-        with patch.object(self.reader, 'check_file_covers_area',
-                          side_effect=[True, False, True]):
-            res = self.reader.filter_fh_by_area([1, 2, 3])
-            self.assertSetEqual(set(res), set([1, 3]))
+        for idx, fh in enumerate([fh0, fh1, fh2, fh3, fh4, fh5]):
+            res = self.reader.time_matches(fh.start_time, fh.end_time)
+            # only the first one should be false
+            self.assertEqual(res, idx not in [0, 4])
 
     @patch('satpy.resample.get_area_def')
     def test_file_covers_area(self, gad):
@@ -217,25 +291,20 @@ class TestFileFileYAMLReader(unittest.TestCase):
                    'trollsched.boundary': trollsched.boundary}
 
         with patch.dict('sys.modules', modules):
-
-            self.reader._area = True
+            self.reader.filter_parameters['area'] = True
             bnd.return_value.contour_poly.intersection.return_value = True
             adb.return_value.contour_poly.intersection.return_value = True
-            res = self.reader.check_file_covers_area(file_handler)
+            res = self.reader.check_file_covers_area(file_handler, True)
             self.assertTrue(res)
 
             bnd.return_value.contour_poly.intersection.return_value = False
             adb.return_value.contour_poly.intersection.return_value = False
-            res = self.reader.check_file_covers_area(file_handler)
+            res = self.reader.check_file_covers_area(file_handler, True)
             self.assertFalse(res)
 
-            self.reader._area = False
-            res = self.reader.check_file_covers_area(file_handler)
-            self.assertTrue(res)
-
             file_handler.get_bounding_box.side_effect = NotImplementedError()
-            self.reader._area = True
-            res = self.reader.check_file_covers_area(file_handler)
+            self.reader.filter_parameters['area'] = True
+            res = self.reader.check_file_covers_area(file_handler, True)
             self.assertTrue(res)
 
     def test_start_end_time(self):
@@ -658,44 +727,15 @@ class TestFileFileYAMLReader(unittest.TestCase):
                          calibration=None, modifiers=())
         self.assertEqual(self.reader._get_file_handlers(lons), None)
 
-    def test_get_shape_slices(self):
-        """Test getting the dataset shape and slices."""
-        all_shapes = [[2, 5], [3, 5], [4, 5]]
-
-        shape, xsl, ysl = self.reader.get_shape_n_slices(all_shapes)
-
-        self.assertListEqual(shape, [9, 5])
-        self.assertEquals(xsl, slice(0, 5))
-        self.assertEquals(ysl, slice(0, 9))
-
-        shape, xsl, ysl = self.reader.get_shape_n_slices(all_shapes,
-                                                         slice(0, 4),
-                                                         slice(0, 6))
-
-        self.assertListEqual(shape, [6, 4])
-        self.assertEquals(xsl, slice(0, 4))
-        self.assertEquals(ysl, slice(0, 6))
-
-        shape, xsl, ysl = self.reader.get_shape_n_slices(all_shapes,
-                                                         slice(0, 8),
-                                                         slice(0, 6))
-
-        self.assertListEqual(shape, [6, 5])
-        self.assertEquals(xsl, slice(0, 8))
-        self.assertEquals(ysl, slice(0, 6))
-
-    @patch('satpy.readers.yaml_reader.np.ma.vstack', spec=np.ma.vstack)
-    @patch('satpy.readers.yaml_reader.Dataset')
-    def test_load_entire_dataset(self, Dataset, vstack):
+    @patch('satpy.readers.yaml_reader.xr')
+    def test_load_entire_dataset(self, xarray):
         """Check loading an entire dataset."""
         file_handlers = [FakeFH(None, None), FakeFH(None, None),
                          FakeFH(None, None), FakeFH(None, None)]
 
-        proj = self.reader._load_entire_dataset(None, {}, file_handlers)
+        proj = self.reader._load_dataset(None, {}, file_handlers)
 
-        self.assertIs(proj, Dataset.return_value)
-
-        Dataset.assert_called_once_with(vstack.return_value)
+        self.assertIs(proj, xarray.concat.return_value)
 
 
 def suite():
@@ -704,6 +744,7 @@ def suite():
     mysuite = unittest.TestSuite()
     mysuite.addTest(loader.loadTestsFromTestCase(TestUtils))
     mysuite.addTest(loader.loadTestsFromTestCase(TestFileFileYAMLReader))
+    mysuite.addTest(loader.loadTestsFromTestCase(TestFileFileYAMLReaderMultiplePatterns))
 
     return mysuite
 

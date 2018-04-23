@@ -34,24 +34,20 @@ http://www.sciencedirect.com/science?_ob=MiamiImageURL&_imagekey=B6V6V-4700BJP-\
 w=c&wchp=dGLzVlz-zSkWz&md5=bac5bc7a4f08007722ae793954f1dd63&ie=/sdarticle.pdf
 """
 
-import glob
-import hashlib
 import logging
-import math
-import multiprocessing
-import os.path
-from ConfigParser import ConfigParser
 from datetime import datetime
-from fnmatch import fnmatch
 
 import numpy as np
 from pyhdf.error import HDF4Error
 from pyhdf.SD import SD
 
-from pyresample import geometry
-from satpy.config import CONFIG_PATH
-from satpy.dataset import Dataset, DatasetID
+import dask.array as da
+import xarray.ufuncs as xu
+import xarray as xr
+from satpy import CHUNK_SIZE
+from satpy.dataset import DatasetID
 from satpy.readers.file_handlers import BaseFileHandler
+from satpy.readers.hdf4_utils import from_sds
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +61,22 @@ class HDFEOSFileReader(BaseFileHandler):
         except HDF4Error as err:
             raise ValueError("Could not load data from " + str(self.filename)
                              + ": " + str(err))
-        self.mda = self.read_mda(self.sd.attributes()['CoreMetadata.0'])
-        self.mda.update(self.read_mda(
+        self.metadata = self.read_mda(self.sd.attributes()['CoreMetadata.0'])
+        self.metadata.update(self.read_mda(
             self.sd.attributes()['StructMetadata.0']))
-        self.mda.update(self.read_mda(
+        self.metadata.update(self.read_mda(
             self.sd.attributes()['ArchiveMetadata.0']))
 
     @property
     def start_time(self):
-        date = (self.mda['INVENTORYMETADATA']['RANGEDATETIME']['RANGEBEGINNINGDATE']['VALUE'] + ' ' +
-                self.mda['INVENTORYMETADATA']['RANGEDATETIME']['RANGEBEGINNINGTIME']['VALUE'])
+        date = (self.metadata['INVENTORYMETADATA']['RANGEDATETIME']['RANGEBEGINNINGDATE']['VALUE'] + ' ' +
+                self.metadata['INVENTORYMETADATA']['RANGEDATETIME']['RANGEBEGINNINGTIME']['VALUE'])
         return datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f')
 
     @property
     def end_time(self):
-        date = (self.mda['INVENTORYMETADATA']['RANGEDATETIME']['RANGEENDINGDATE']['VALUE'] + ' ' +
-                self.mda['INVENTORYMETADATA']['RANGEDATETIME']['RANGEENDINGTIME']['VALUE'])
+        date = (self.metadata['INVENTORYMETADATA']['RANGEDATETIME']['RANGEENDINGDATE']['VALUE'] + ' ' +
+                self.metadata['INVENTORYMETADATA']['RANGEDATETIME']['RANGEENDINGTIME']['VALUE'])
         return datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f')
 
     def read_mda(self, attribute):
@@ -124,24 +120,52 @@ class HDFEOSGeoReader(HDFEOSFileReader):
     def __init__(self, filename, filename_info, filetype_info):
         HDFEOSFileReader.__init__(self, filename, filename_info, filetype_info)
 
-        ds = self.mda['INVENTORYMETADATA'][
+        ds = self.metadata['INVENTORYMETADATA'][
             'COLLECTIONDESCRIPTIONCLASS']['SHORTNAME']['VALUE']
         if ds.endswith('D03'):
             self.resolution = 1000
         else:
             self.resolution = 5000
         self.cache = {}
-        self.cache['lons'] = None
-        self.cache['lats'] = None
+        self.cache[250] = {}
+        self.cache[250]['lons'] = None
+        self.cache[250]['lats'] = None
 
-    def get_area_def(self, *args, **kwargs):
-        raise NotImplementedError
+        self.cache[500] = {}
+        self.cache[500]['lons'] = None
+        self.cache[500]['lats'] = None
+
+        self.cache[1000] = {}
+        self.cache[1000]['lons'] = None
+        self.cache[1000]['lats'] = None
 
     def get_dataset(self, key, info, out=None, xslice=None, yslice=None):
+        """Get the dataset designated by *key*."""
+        if key.name in ['solar_zenith_angle', 'solar_azimuth_angle',
+                        'satellite_zenith_angle', 'satellite_azimuth_angle']:
+
+            if key.name == 'solar_zenith_angle':
+                var = self.sd.select('SolarZenith')
+            if key.name == 'solar_azimuth_angle':
+                var = self.sd.select('SolarAzimuth')
+            if key.name == 'satellite_zenith_angle':
+                var = self.sd.select('SensorZenith')
+            if key.name == 'satellite_azimuth_angle':
+                var = self.sd.select('SensorAzimuth')
+
+            data = xr.DataArray(from_sds(var, chunks=CHUNK_SIZE),
+                                dims=['y', 'x']).astype(np.float32)
+            data = data.where(data != var._FillValue)
+            data = data * np.float32(var.scale_factor)
+
+            data.attrs = info
+            return data
+
         if key.name not in ['longitude', 'latitude']:
             return
 
-        if self.cache['lons'] is None or self.cache['lats'] is None:
+        if (self.cache[key.resolution]['lons'] is None or
+                self.cache[key.resolution]['lats'] is None):
 
             lons_id = DatasetID('longitude',
                                 resolution=key.resolution)
@@ -150,16 +174,31 @@ class HDFEOSGeoReader(HDFEOSFileReader):
 
             lons, lats = self.load(
                 [lons_id, lats_id], interpolate=False, raw=True)
-            from geotiepoints.geointerpolator import GeoInterpolator
-            self.cache['lons'], self.cache['lats'] = self._interpolate(
-                [lons, lats], self.resolution, lons_id.resolution, GeoInterpolator)
+            if key.resolution != self.resolution:
+                from geotiepoints.geointerpolator import GeoInterpolator
+                lons, lats = self._interpolate([lons, lats],
+                                               self.resolution,
+                                               lons_id.resolution,
+                                               GeoInterpolator)
+                lons = np.ma.masked_invalid(np.ascontiguousarray(lons))
+                lats = np.ma.masked_invalid(np.ascontiguousarray(lats))
+            self.cache[key.resolution]['lons'] = lons
+            self.cache[key.resolution]['lats'] = lats
 
         if key.name == 'latitude':
-            return Dataset(self.cache['lats'], id=key, **info)
+            data = self.cache[key.resolution]['lats'].filled(np.nan)
+            data = xr.DataArray(da.from_array(data, chunks=(CHUNK_SIZE, CHUNK_SIZE)),
+                                dims=['y', 'x'])
         else:
-            return Dataset(self.cache['lons'], id=key, **info)
+            data = self.cache[key.resolution]['lons'].filled(np.nan)
+            data = xr.DataArray(da.from_array(data, chunks=(CHUNK_SIZE,
+                                                            CHUNK_SIZE)),
+                                dims=['y', 'x'])
+        data.attrs = info
+        return data
 
     def load(self, keys, interpolate=True, raw=False):
+        """Load the data."""
         projectables = []
         for key in keys:
             dataset = self.sd.select(key.name.capitalize())
@@ -171,12 +210,16 @@ class HDFEOSGeoReader(HDFEOSFileReader):
             data = np.ma.masked_equal(dataset.get(), fill_value) * scale_factor
 
             # TODO: interpolate if needed
-            if key.resolution is not None and key.resolution < self.resolution and interpolate:
+            if (key.resolution is not None and
+                    key.resolution < self.resolution and
+                    interpolate):
                 data = self._interpolate(data, self.resolution, key.resolution)
-            if raw:
-                projectables.append(data)
-            else:
-                projectables.append(Dataset(data, id=key))
+            if not raw:
+                data = data.filled(np.nan)
+                data = xr.DataArray(da.from_array(data, chunks=(CHUNK_SIZE,
+                                                                CHUNK_SIZE)),
+                                    dims=['y', 'x'])
+            projectables.append(data)
 
         return projectables
 
@@ -216,7 +259,7 @@ class HDFEOSGeoReader(HDFEOSFileReader):
             chunk_size = 20
         elif resolution == 250:
             fine_cols = np.arange(1354 * 4) / 4.0
-            fine_rows = (np.arange(lines * 4) + 1.5) / 4.0
+            fine_rows = (np.arange(lines * 4) - 1.5) / 4.0
             chunk_size = 40
 
         along_track_order = 1
@@ -232,50 +275,6 @@ class HDFEOSGeoReader(HDFEOSFileReader):
         satint.fill_borders("y", "x")
         return satint.interpolate()
 
-    def get_lonlat(self, resolution, cores=1):
-        """Read lat and lon.
-        """
-        if resolution in self.areas:
-            return self.areas[resolution]
-        logger.debug("generating lon, lat at %d", resolution)
-        if self.geofile is not None:
-            coarse_resolution = 1000
-            filename = self.geofile
-        else:
-            coarse_resolution = 5000
-            logger.info("Using 5km geolocation and interpolating")
-            filename = (self.datafiles.get(1000) or
-                        self.datafiles.get(500) or
-                        self.datafiles.get(250))
-
-        logger.debug("Loading geolocation from file: " + str(filename)
-                     + " at resolution " + str(coarse_resolution))
-
-        data = SD(str(filename))
-        lat = data.select("Latitude")
-        fill_value = lat.attributes()["_FillValue"]
-        lat = np.ma.masked_equal(lat.get(), fill_value)
-        lon = data.select("Longitude")
-        fill_value = lon.attributes()["_FillValue"]
-        lon = np.ma.masked_equal(lon.get(), fill_value)
-
-        if resolution == coarse_resolution:
-            self.areas[resolution] = lon, lat
-            return lon, lat
-
-        from geotiepoints import modis5kmto1km, modis1kmto500m, modis1kmto250m
-        logger.debug("Interpolating from " + str(coarse_resolution)
-                     + " to " + str(resolution))
-        if coarse_resolution == 5000:
-            lon, lat = modis5kmto1km(lon, lat)
-        if resolution == 500:
-            lon, lat = modis1kmto500m(lon, lat, cores)
-        if resolution == 250:
-            lon, lat = modis1kmto250m(lon, lat, cores)
-
-        self.areas[resolution] = lon, lat
-        return lon, lat
-
 
 class HDFEOSBandReader(HDFEOSFileReader):
 
@@ -286,13 +285,12 @@ class HDFEOSBandReader(HDFEOSFileReader):
     def __init__(self, filename, filename_info, filetype_info):
         HDFEOSFileReader.__init__(self, filename, filename_info, filetype_info)
 
-        ds = self.mda['INVENTORYMETADATA'][
+        ds = self.metadata['INVENTORYMETADATA'][
             'COLLECTIONDESCRIPTIONCLASS']['SHORTNAME']['VALUE']
         self.resolution = self.res[ds[-3]]
 
     def get_dataset(self, key, info):
-        """Read data from file and return the corresponding projectables.
-        """
+        """Read data from file and return the corresponding projectables."""
         datadict = {
             1000: ['EV_250_Aggr1km_RefSB',
                    'EV_500_Aggr1km_RefSB',
@@ -302,14 +300,16 @@ class HDFEOSBandReader(HDFEOSFileReader):
                   'EV_500_RefSB'],
             250: ['EV_250_RefSB']}
 
-        platform_name = self.mda['INVENTORYMETADATA']['ASSOCIATEDPLATFORMINSTRUMENTSENSOR'][
+        platform_name = self.metadata['INVENTORYMETADATA']['ASSOCIATEDPLATFORMINSTRUMENTSENSOR'][
             'ASSOCIATEDPLATFORMINSTRUMENTSENSORCONTAINER']['ASSOCIATEDPLATFORMSHORTNAME']['VALUE']
+
+        info.update({'platform_name': 'EOS-' + platform_name})
+        info.update({'sensor': 'modis'})
 
         if self.resolution != key.resolution:
             return
 
         datasets = datadict[self.resolution]
-
         for dataset in datasets:
             subdata = self.sd.select(dataset)
             band_names = subdata.attributes()["band_names"].split(",")
@@ -320,12 +320,19 @@ class HDFEOSBandReader(HDFEOSFileReader):
             except ValueError:
                 continue
             uncertainty = self.sd.select(dataset + "_Uncert_Indexes")
-            if dataset.endswith('Emissive'):
-                array = calibrate_tb(subdata, uncertainty, [index], band_names)
-            else:
-                array = calibrate_refl(subdata, uncertainty, [index])
+            array = xr.DataArray(from_sds(subdata, chunks=CHUNK_SIZE)[index, :, :],
+                                 dims=['y', 'x']).astype(np.float32)
+            valid_range = subdata.attributes()['valid_range']
+            array = array.where(array >= np.float32(valid_range[0]))
+            array = array.where(array <= np.float32(valid_range[1]))
+            array = array.where(from_sds(uncertainty, chunks=CHUNK_SIZE)[index, :, :] < 15)
 
-            projectable = Dataset(array[0], id=key, mask=array[0].mask)
+            if dataset.endswith('Emissive'):
+                projectable = calibrate_tb(array, subdata.attributes(), index, key.name)
+            else:
+                projectable = calibrate_refl(array, subdata.attributes(), index)
+            projectable.attrs = info
+
             # if ((platform_name == 'Aqua' and key.name in ["6", "27", "36"]) or
             #         (platform_name == 'Terra' and key.name in ["29"])):
             #     height, width = projectable.shape
@@ -378,61 +385,37 @@ class HDFEOSBandReader(HDFEOSFileReader):
         return self.data.select("SensorAzimuth")
 
 
-def calibrate_refl(subdata, uncertainty, indices):
-    """Calibration for reflective channels.
-    """
+def calibrate_refl(array, attributes, index):
+    """Calibration for reflective channels."""
+    offset = np.float32(attributes["reflectance_offsets"][index])
+    scale = np.float32(attributes["reflectance_scales"][index])
 
-    array = np.vstack(np.expand_dims(subdata[idx, :, :], 0) for idx in indices)
-    valid_range = subdata.attributes()["valid_range"]
-    array = np.ma.masked_outside(array,
-                                 valid_range[0],
-                                 valid_range[1],
-                                 copy=False)
-    array = np.ma.masked_where(
-        (uncertainty.get()[indices, :, :] >= 15), array, False)
-
-    array = array * np.float32(1.0)
-    offsets = np.array(subdata.attributes()["reflectance_offsets"],
-                       dtype=np.float32)[indices]
-    scales = np.array(subdata.attributes()["reflectance_scales"],
-                      dtype=np.float32)[indices]
-    dims = (len(indices), 1, 1)
-    array = (array - offsets.reshape(dims)) * scales.reshape(dims) * 100
+    array = (array - offset) * scale * 100
 
     return array
 
 
-def calibrate_tb(subdata, uncertainty, indices, band_names):
-    """Calibration for the emissive channels.
-    """
+def calibrate_tb(array, attributes, index, band_name):
+    """Calibration for the emissive channels."""
+    offset = np.float32(attributes["radiance_offsets"][index])
+    scale = np.float32(attributes["radiance_scales"][index])
 
-    array = np.vstack(np.expand_dims(subdata[idx, :, :], 0) for idx in indices)
-    valid_range = subdata.attributes()["valid_range"]
-    array = np.ma.masked_outside(array,
-                                 valid_range[0],
-                                 valid_range[1],
-                                 copy=False)
-    array = np.ma.masked_where(
-        (uncertainty.get()[indices, :, :] >= 15), array, False)
-    offsets = np.array(subdata.attributes()["radiance_offsets"],
-                       dtype=np.float32)[indices]
-    scales = np.array(subdata.attributes()["radiance_scales"],
-                      dtype=np.float32)[indices]
+    array = (array - offset) * scale
 
-    #- Planck constant (Joule second)
+    # Planck constant (Joule second)
     h__ = np.float32(6.6260755e-34)
 
-    #- Speed of light in vacuum (meters per second)
+    # Speed of light in vacuum (meters per second)
     c__ = np.float32(2.9979246e+8)
 
-    #- Boltzmann constant (Joules per Kelvin)
+    # Boltzmann constant (Joules per Kelvin)
     k__ = np.float32(1.380658e-23)
 
-    #- Derived constants
+    # Derived constants
     c_1 = 2 * h__ * c__ * c__
     c_2 = (h__ * c__) / k__
 
-    #- Effective central wavenumber (inverse centimeters)
+    # Effective central wavenumber (inverse centimeters)
     cwn = np.array([
         2.641775E+3, 2.505277E+3, 2.518028E+3, 2.465428E+3,
         2.235815E+3, 2.200346E+3, 1.477967E+3, 1.362737E+3,
@@ -440,7 +423,7 @@ def calibrate_tb(subdata, uncertainty, indices, band_names):
         7.483394E+2, 7.308963E+2, 7.188681E+2, 7.045367E+2],
         dtype=np.float32)
 
-    #- Temperature correction slope (no units)
+    # Temperature correction slope (no units)
     tcs = np.array([
         9.993411E-1, 9.998646E-1, 9.998584E-1, 9.998682E-1,
         9.998819E-1, 9.998845E-1, 9.994877E-1, 9.994918E-1,
@@ -448,7 +431,7 @@ def calibrate_tb(subdata, uncertainty, indices, band_names):
         9.999160E-1, 9.999167E-1, 9.999191E-1, 9.999281E-1],
         dtype=np.float32)
 
-    #- Temperature correction intercept (Kelvin)
+    # Temperature correction intercept (Kelvin)
     tci = np.array([
         4.770532E-1, 9.262664E-2, 9.757996E-2, 8.929242E-2,
         7.310901E-2, 7.060415E-2, 2.204921E-1, 2.046087E-1,
@@ -457,23 +440,18 @@ def calibrate_tb(subdata, uncertainty, indices, band_names):
         dtype=np.float32)
 
     # Transfer wavenumber [cm^(-1)] to wavelength [m]
-    cwn = 1 / (cwn * 100)
+    cwn = 1. / (cwn * 100)
 
     # Some versions of the modis files do not contain all the bands.
     emmissive_channels = ["20", "21", "22", "23", "24", "25", "27", "28", "29",
                           "30", "31", "32", "33", "34", "35", "36"]
-    current_channels = [i for i, band in enumerate(emmissive_channels)
-                        if band in band_names]
-    global_indices = list(np.array(current_channels)[indices])
+    global_index = emmissive_channels.index(band_name)
 
-    dims = (len(indices), 1, 1)
-    cwn = cwn[global_indices].reshape(dims)
-    tcs = tcs[global_indices].reshape(dims)
-    tci = tci[global_indices].reshape(dims)
-
-    tmp = (array - offsets.reshape(dims)) * scales.reshape(dims)
-    tmp = c_2 / (cwn * np.ma.log(c_1 / (1000000 * tmp * cwn ** 5) + 1))
-    array = (tmp - tci) / tcs
+    cwn = cwn[global_index]
+    tcs = tcs[global_index]
+    tci = tci[global_index]
+    array = c_2 / (cwn * xu.log(c_1 / (1000000 * array * cwn ** 5) + 1))
+    array = (array - tci) / tcs
     return array
 
 
