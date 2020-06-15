@@ -69,13 +69,43 @@ datasets:
     coordinates: [longitude, latitude]
     file_type: nucaps
     pressure_based: True
+  MIT_Temperature:
+    name: MIT_Temperature
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
+  FG_Temperature:
+    name: FG_Temperature
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
   H2O:
     name: H2O
     coordinates: [longitude, latitude]
     file_type: nucaps
     pressure_based: True
+  MIT_H2O:
+    name: MIT_H2O
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
+  FG_H2O:
+    name: FG_H2O
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
   H2O_MR:
     name: H2O_MR
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
+  MIT_H2O_MR:
+    name: MIT_H2O_MR
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: True
+  FG_H2O_MR: 
+    name: FG_H2O_MR
     coordinates: [longitude, latitude]
     file_type: nucaps
     pressure_based: True
@@ -154,6 +184,11 @@ datasets:
     coordinates: [longitude, latitude]
     file_type: nucaps
     pressure_based: True
+  Stability:
+    name: Stability
+    coordinates: [longitude, latitude]
+    file_type: nucaps
+    pressure_based: False
   Pressure_Levels:
     name: Pressure_Levels
     standard_name: air_pressure
